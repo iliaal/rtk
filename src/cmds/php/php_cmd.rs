@@ -49,7 +49,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn filter_php_lint_output(output: &str) -> String {
+pub(crate) fn filter_php_lint_output(output: &str) -> String {
     let mut lines = Vec::new();
 
     for line in strip_ansi_and_controls(output).lines() {

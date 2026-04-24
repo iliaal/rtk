@@ -5,7 +5,9 @@
 //! rtk runs on the host, the actual tool runs inside a container, and stdout
 //! flows back through the filter on its way to the user.
 
-use crate::cmds::php::{ecs_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd, test_output};
+use crate::cmds::php::{
+    ecs_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd, test_output,
+};
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::{bail, Result};
@@ -22,8 +24,9 @@ pub fn run(tool: &str, cmd_args: &[String], verbose: u8) -> Result<i32> {
         "ecs" => ecs_cmd::filter_ecs_output,
         "pint" => pint_cmd::filter_pint_json,
         "phpt" => phpt_cmd::filter_phpt_output,
+        "php-lint" => php_cmd::filter_php_lint_output,
         other => bail!(
-            "rtk wrap: unknown tool '{}'. Supported: phpunit, phpstan, pest, paratest, ecs, pint, phpt.",
+            "rtk wrap: unknown tool '{}'. Supported: phpunit, phpstan, pest, paratest, ecs, pint, phpt, php-lint.",
             other
         ),
     };

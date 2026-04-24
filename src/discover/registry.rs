@@ -531,6 +531,14 @@ fn strip_command_wrapper(cmd: &str) -> Option<(String, String)> {
 /// the wrap rewrite preserves the original command verbatim.
 fn wrappable_tool_for(inner: &str) -> Option<&'static str> {
     let normalized = strip_php_ini_flags(inner);
+
+    // `php -l <file>` routes to the generic `rtk php` rule rather than a
+    // dedicated rtk_cmd, so special-case it before falling through to the
+    // classifier. Runs the lint-specific filter in wrap mode.
+    if is_php_lint_invocation(&normalized) {
+        return Some("php-lint");
+    }
+
     let classified = classify_command(&normalized);
     let rtk_equiv = match classified {
         Classification::Supported { rtk_equivalent, .. } => rtk_equivalent,
@@ -541,6 +549,14 @@ fn wrappable_tool_for(inner: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|&candidate| candidate == tool)
+}
+
+fn is_php_lint_invocation(cmd: &str) -> bool {
+    let mut tokens = cmd.split_whitespace();
+    if tokens.next() != Some("php") {
+        return false;
+    }
+    tokens.any(|t| t == "-l" || t == "--syntax-check")
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -4728,5 +4744,49 @@ mod tests {
             rewrite_command("docker exec app php artisan migrate", &[]),
             Some("rtk docker exec app php artisan migrate".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint() {
+        assert_eq!(
+            rewrite_command("docker exec app php -l src/Foo.php", &[]),
+            Some("rtk wrap php-lint -- docker exec app php -l src/Foo.php".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint_with_ini_flags() {
+        assert_eq!(
+            rewrite_command(
+                "docker exec app php -ddisable_functions= -l src/Foo.php",
+                &[]
+            ),
+            Some(
+                "rtk wrap php-lint -- docker exec app php -ddisable_functions= -l src/Foo.php"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint_long_form() {
+        assert_eq!(
+            rewrite_command("docker exec app php --syntax-check src/Foo.php", &[]),
+            Some("rtk wrap php-lint -- docker exec app php --syntax-check src/Foo.php".into())
+        );
+    }
+
+    #[test]
+    fn test_is_php_lint_invocation_negative_cases() {
+        assert!(!is_php_lint_invocation("php artisan migrate"));
+        assert!(!is_php_lint_invocation("php vendor/bin/phpunit tests/"));
+        assert!(!is_php_lint_invocation("pint --parallel"));
+        assert!(!is_php_lint_invocation("php"));
+    }
+
+    #[test]
+    fn test_is_php_lint_invocation_positive_cases() {
+        assert!(is_php_lint_invocation("php -l src/Foo.php"));
+        assert!(is_php_lint_invocation("php --syntax-check src/Foo.php"));
     }
 }
