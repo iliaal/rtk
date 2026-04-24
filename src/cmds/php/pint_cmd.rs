@@ -68,7 +68,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn filter_pint_json(output: &str) -> String {
+pub(crate) fn filter_pint_json(output: &str) -> String {
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return "pint: ok".to_string();

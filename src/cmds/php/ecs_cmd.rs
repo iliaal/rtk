@@ -23,7 +23,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn filter_ecs_output(output: &str) -> String {
+pub(crate) fn filter_ecs_output(output: &str) -> String {
     let cleaned = strip_ansi_and_controls(output);
     if cleaned.contains("No errors found") {
         return "✓ ecs: no issues".to_string();

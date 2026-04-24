@@ -24,7 +24,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    read, summary, tree, wc_cmd, wrap_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -737,6 +737,17 @@ enum Commands {
         /// Arguments forwarded to `php run-tests.php` (e.g., Zend/tests/, -q)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Run a command inside any wrapper (docker exec, kubectl exec, ssh) and filter
+    /// its output as if it were the named tool. Example:
+    ///   rtk wrap phpunit -- docker exec app vendor/bin/phpunit tests/
+    Wrap {
+        /// Tool whose filter to apply (phpunit, phpstan, pest, paratest, ecs, pint, phpt)
+        tool: String,
+        /// Command to run (everything after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
     },
 
     /// Rake/Rails test with compact Minitest output (Ruby)
@@ -2249,6 +2260,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Phpt { args } => phpt_cmd::run(&args, cli.verbose)?,
 
+        Commands::Wrap { tool, cmd } => wrap_cmd::run(&tool, &cmd, cli.verbose)?,
+
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
@@ -2621,6 +2634,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ecs { .. }
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
+            | Commands::Wrap { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }

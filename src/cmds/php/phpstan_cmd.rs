@@ -117,7 +117,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 // ── JSON filtering ───────────────────────────────────────────────────────────
 
-fn filter_phpstan_json(output: &str) -> String {
+pub(crate) fn filter_phpstan_json(output: &str) -> String {
     if output.trim().is_empty() {
         return "PHPStan: No output".to_string();
     }
@@ -187,7 +187,7 @@ fn filter_phpstan_json(output: &str) -> String {
 
 // ── Text fallback ────────────────────────────────────────────────────────────
 
-fn filter_phpstan_text(output: &str) -> String {
+pub(crate) fn filter_phpstan_text(output: &str) -> String {
     // Check for errors first
     for line in output.lines() {
         let t = line.trim();
