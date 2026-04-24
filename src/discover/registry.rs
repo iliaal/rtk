@@ -1,10 +1,14 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::core::utils::composer_bin_dirs;
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::path::Path;
 
 use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+
+const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -120,6 +124,9 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
+    // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
+    // custom bin-dir → phpunit (so one rule matches every Composer layout).
+    let cmd_normalized = normalize_php_tool_command(&cmd_normalized);
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
@@ -245,6 +252,70 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     }
 
     split_on_operators(trimmed, true)
+}
+
+fn normalize_php_tool_command(cmd: &str) -> String {
+    normalize_php_tool_command_with_dirs(cmd, &composer_bin_dirs())
+}
+
+fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
+    let first_space = cmd.find(char::is_whitespace);
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+
+    let Some(tool) = normalize_php_tool_word(first_word, bin_dirs) else {
+        return cmd.to_string();
+    };
+
+    match first_space {
+        Some(pos) => format!("{}{}", tool, &cmd[pos..]),
+        None => tool.to_string(),
+    }
+}
+
+fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
+    let normalized_word = normalize_php_tool_path(word);
+
+    for tool in PHP_TOOL_NAMES {
+        if normalized_word == tool {
+            return Some(tool);
+        }
+
+        if bin_dirs
+            .iter()
+            .any(|bin_dir| matches_php_tool_path(&normalized_word, bin_dir, tool))
+        {
+            return Some(tool);
+        }
+    }
+
+    None
+}
+
+fn matches_php_tool_path(word: &str, bin_dir: &Path, tool: &str) -> bool {
+    let normalized_dir = normalize_php_tool_path(&bin_dir.to_string_lossy());
+    let candidate = format!("{normalized_dir}/{tool}");
+    word == candidate || word.ends_with(&format!("/{candidate}"))
+}
+
+fn normalize_php_tool_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+
+    if let Some((stem, ext)) = normalized.rsplit_once('.') {
+        if ["bat", "cmd", "exe", "ps1"]
+            .iter()
+            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        {
+            normalized = stem.to_string();
+        }
+    }
+
+    normalized
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -4099,6 +4170,161 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    // --- PHP tooling ---
+
+    #[test]
+    fn test_classify_phpunit() {
+        assert!(matches!(
+            classify_command("phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpunit --filter EmailTest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_php_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("php vendor/bin/phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpunit() {
+        assert_eq!(
+            rewrite_command("phpunit tests/", &[]),
+            Some("rtk phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vendor_bin_phpunit() {
+        assert_eq!(
+            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_phpstan() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpstan analyse src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_phpstan_direct() {
+        assert!(matches!(
+            classify_command("phpstan analyse --level=9"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_vendor_bin() {
+        assert_eq!(
+            rewrite_command("vendor/bin/phpstan analyse src/", &[]),
+            Some("rtk phpstan analyse src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_php_prefix() {
+        assert_eq!(
+            rewrite_command("php vendor/bin/phpstan analyse", &[]),
+            Some("rtk phpstan analyse".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_version_not_rewritten() {
+        assert_eq!(rewrite_command("phpstan --version", &[]), None);
+        assert_eq!(rewrite_command("phpstan list", &[]), None);
+        assert_eq!(rewrite_command("phpstan clear-result-cache", &[]), None);
+    }
+
+    #[test]
+    fn test_classify_pest() {
+        assert!(matches!(
+            classify_command("vendor/bin/pest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pint() {
+        assert!(matches!(
+            classify_command("vendor/bin/pint --test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pint",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpt() {
+        assert_eq!(
+            rewrite_command("php run-tests.php Zend/tests/", &[]),
+            Some("rtk phpt Zend/tests/".into())
+        );
+        assert_eq!(
+            rewrite_command("php ./run-tests.php -q", &[]),
+            Some("rtk phpt -q".into())
+        );
+    }
+
+    #[test]
+    fn test_php_artisan_rewrites() {
+        assert!(matches!(
+            classify_command("php artisan migrate"),
+            Classification::Supported {
+                rtk_equivalent: "rtk php",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_normalize_php_tool_command_custom_bin_dir() {
+        use std::path::PathBuf;
+        let dirs = vec![PathBuf::from("tools/bin"), PathBuf::from("vendor/bin")];
+        assert_eq!(
+            normalize_php_tool_command_with_dirs("tools/bin/phpunit tests/", &dirs),
+            "phpunit tests/"
+        );
+        assert_eq!(
+            normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
+            "pest"
         );
     }
 }
