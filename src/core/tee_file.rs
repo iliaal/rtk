@@ -142,17 +142,34 @@ fn write_tee_file(
     let slug = sanitize_slug(slug);
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let filepath = dir.join(format!("{}_{}.log", epoch, slug));
+    // Tail-heavy commands (test runners, build summaries) put their useful data at
+    // the end; head-only truncation throws that away. The 25/75 split keeps the
+    // prologue while giving the summary three quarters of the budget.
     let content = if raw.len() > max_file_size {
-        let boundary = raw
+        let head_budget = max_file_size / 4;
+        let tail_budget = max_file_size - head_budget;
+
+        let head_end = raw
             .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
+            .take_while(|(i, _)| *i < head_budget)
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
+
+        let tail_target = raw.len().saturating_sub(tail_budget);
+        let tail_start = raw
+            .char_indices()
+            .find(|(i, _)| *i >= tail_target)
+            .map(|(i, _)| i)
+            .unwrap_or(raw.len())
+            .max(head_end);
+
+        let omitted = tail_start - head_end;
         format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
+            "{}\n\n--- {} bytes truncated from middle ---\n\n{}",
+            &raw[..head_end],
+            omitted,
+            &raw[tail_start..]
         )
     } else {
         raw.to_string()
@@ -345,20 +362,62 @@ mod tests {
         let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 1000 bytes ---"));
+        assert!(content.contains("bytes truncated from middle"));
         assert!(content.len() < 2000);
     }
 
     #[test]
-    fn test_write_tee_file_truncation_utf8_boundary() {
+    fn test_write_tee_file_keeps_tail() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let japanese = "\u{6F22}".repeat(333);
-        assert_eq!(japanese.len(), 999);
+        // Simulate a tail-heavy command: lots of progress lines, then a summary.
+        let mut raw = String::new();
+        for i in 0..3000 {
+            raw.push_str(&format!("TEST {}/3000 [foo_{}.phpt]\n", i, i));
+        }
+        raw.push_str("FAILED TEST SUMMARY\nfoo_42.phpt\nfoo_777.phpt\nDONE");
+
+        let cap = 4096;
+        assert!(raw.len() > cap);
+
+        let result =
+            write_tee_file(&raw, "make_test", tmpdir.path(), cap, 20).expect("tee file written");
+        let content = fs::read_to_string(&result).unwrap();
+
+        assert!(content.starts_with("TEST 0/3000"), "head missing");
+        assert!(content.contains("bytes truncated from middle"));
+        assert!(content.ends_with("DONE"), "tail summary missing");
+        assert!(content.contains("FAILED TEST SUMMARY"));
+    }
+
+    #[test]
+    fn test_write_tee_file_truncation_utf8_boundary() {
+        // Japanese chars are 3 bytes each in UTF-8. With max_file_size=998 the
+        // head budget is 249 bytes and the tail budget 749 — both land mid-char,
+        // so the slicer must round to a boundary or panic.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let japanese = "\u{6F22}".repeat(1000);
+        assert_eq!(japanese.len(), 3000);
         let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 998 bytes ---"));
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+        assert!(content.contains("bytes truncated from middle"));
+        assert!(content.starts_with('\u{6F22}'));
+        assert!(content.ends_with('\u{6F22}'));
+    }
+
+    #[test]
+    fn test_write_tee_file_truncation_emoji() {
+        // Emoji are 4 bytes each; head budget 100 and tail budget 301 both fall
+        // mid-emoji.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let emojis = "\u{1F600}".repeat(200);
+        assert_eq!(emojis.len(), 800);
+        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 401, 20);
+        let path = result.expect("tee file written");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("bytes truncated from middle"));
+        assert!(content.starts_with('\u{1F600}'));
+        assert!(content.ends_with('\u{1F600}'));
     }
 
     #[test]
