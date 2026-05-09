@@ -32,6 +32,8 @@ pub enum GitCommand {
     Stash { subcommand: Option<String> },
     Worktree,
     Grep,
+    LsTree,
+    LsFiles,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -108,6 +110,67 @@ pub fn run(
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
         GitCommand::Grep => run_grep(args, max_lines, verbose, global_args),
+        GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
+    }
+}
+
+/// Re-insert `--` before the first path-like argument when clap has consumed it.
+///
+/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
+/// first positional argument (before any other positional).  This means:
+///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
+///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
+///
+/// Without the `--` separator git may treat an unambiguous path as a revision and
+/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
+/// argument; see `normalize_diff_args_impl` for the detection rules.
+fn normalize_diff_args(args: &[String]) -> Vec<String> {
+    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
+}
+
+/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
+///
+/// The path-detection logic is:
+/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
+/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
+///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
+/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
+///    happens to share a name with a branch or ref, e.g. a file named `main`).
+fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    // Already has `--` — nothing to do
+    if args.iter().any(|a| a == "--") {
+        return args.to_vec();
+    }
+    let path_start = args.iter().position(|arg| {
+        if arg.starts_with('-') {
+            return false;
+        }
+        // Explicit path prefixes — always treat as path regardless of existence
+        if arg.starts_with('.') || arg.starts_with('~') {
+            return true;
+        }
+        // Contains path separator — use filesystem check to distinguish
+        // branch names (feature/auth) from real paths (src/main.rs)
+        if arg.contains('/') || arg.contains('\\') {
+            return path_exists(arg);
+        }
+        // Bare word (no separator, no special prefix) — never inject `--`
+        // This avoids misidentifying a ref/branch as a path even if a same-named
+        // file happens to exist on disk.
+        false
+    });
+    match path_start {
+        Some(idx) => {
+            let mut out = args[..idx].to_vec();
+            out.push("--".to_string());
+            out.extend_from_slice(&args[idx..]);
+            out
+        }
+        None => args.to_vec(),
     }
 }
 
@@ -2635,19 +2698,18 @@ fn filter_worktree_list(output: &str) -> String {
 /// Match what `rtk grep` passes through, plus git-specific `--name-only`.
 fn git_grep_has_format_flag(args: &[String]) -> bool {
     args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-c" | "--count"
-                | "-l"
-                | "--files-with-matches"
-                | "--name-only"
-                | "-L"
-                | "--files-without-match"
-                | "-o"
-                | "--only-matching"
-                | "-z"
-                | "--null"
-        )
+        // Long forms match exactly; short forms may be bundled (e.g. `-ln`), so
+        // scan each letter of a single-dash cluster — `-c -l -L -o -z` all yield
+        // output that is already compact or shape-sensitive, so we passthrough.
+        match arg.as_str() {
+            "--count" | "--files-with-matches" | "--name-only" | "--files-without-match"
+            | "--only-matching" | "--null" => true,
+            s if s.starts_with("--") => false,
+            s if s.starts_with('-') && s.len() > 1 => {
+                s[1..].chars().any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'z'))
+            }
+            _ => false,
+        }
     })
 }
 
@@ -2658,7 +2720,9 @@ fn git_grep_has_no_filename(args: &[String]) -> bool {
 }
 
 fn git_grep_has_line_number(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-n" || a == "--line-number")
+    args.iter().any(|a| {
+        a == "--line-number" || (a.starts_with('-') && !a.starts_with("--") && a.contains('n'))
+    })
 }
 
 fn run_grep(
@@ -2729,18 +2793,20 @@ fn run_grep(
     let raw_output = result.stdout.clone();
 
     if result.stdout.trim().is_empty() {
-        // Surface stderr for usage errors (bad regex, not-a-repo, ambiguous arg).
-        if result.exit_code != 0 && result.exit_code != 1 && !result.stderr.trim().is_empty() {
+        // Empty stdout is either a genuine no-match (exit 1) or a real error
+        // (exit >= 2: bad object, not-a-repo, ambiguous arg, transient odb read).
+        // git grep prints nothing on a no-match, so neither do we: a synthetic
+        // "0 matches" exceeds the raw command and, on an error exit, masks the
+        // failure as a false negative (cf. `rtk grep`, which surfaces exit >= 2).
+        if result.exit_code >= 2 && !result.stderr.trim().is_empty() {
             eprintln!("{}", result.stderr.trim());
         }
-        let msg = "0 matches".to_string();
-        println!("{}", msg);
         let args_display = args.join(" ");
         timer.track(
             &format!("git grep {}", args_display),
             "rtk git grep",
             &raw_output,
-            &msg,
+            "",
         );
         return Ok(result.exit_code);
     }
@@ -2759,6 +2825,192 @@ fn run_grep(
     timer.track(
         &format!("git grep {}", args_display),
         "rtk git grep",
+        &raw_output,
+        &formatted,
+    );
+
+    Ok(result.exit_code)
+}
+
+/// Flags whose presence makes `git ls-tree` output incompatible with the
+/// path-per-line shape `find_wrapper` expects.
+fn ls_tree_breaks_format(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-z" | "-l" | "--long" | "--object-only" | "--abbrev"
+        ) || a.starts_with("--abbrev=")
+    })
+}
+
+/// Flags whose presence makes `git ls-files` output incompatible with the
+/// path-per-line shape `find_wrapper` expects.
+fn ls_files_breaks_format(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-z"
+                | "-s"
+                | "--stage"
+                | "-t"
+                | "-v"
+                | "-c"
+                | "-d"
+                | "-m"
+                | "-u"
+                | "--debug"
+                | "--eol"
+        )
+    })
+}
+
+/// Extract the path portion of a `git ls-tree` line.
+///
+/// Default format: `<mode> SP <type> SP <hash> TAB <path>`. With `--name-only`
+/// the line is just the path. Returns the original line if neither shape matches.
+fn ls_tree_extract_path(line: &str) -> &str {
+    if let Some(tab_pos) = line.find('\t') {
+        &line[tab_pos + 1..]
+    } else {
+        line
+    }
+}
+
+fn run_ls_tree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-tree");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-tree")?;
+
+    if verbose > 0 {
+        eprintln!("git ls-tree executed");
+    }
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let raw_output = result.stdout.clone();
+
+    // Format-breaking flags: emit raw output unchanged.
+    if ls_tree_breaks_format(args) {
+        print!("{}", raw_output);
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git ls-tree {}", args_display),
+            &format!("rtk git ls-tree {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    if raw_output.trim().is_empty() {
+        let msg = "(empty tree)".to_string();
+        println!("{}", msg);
+        let args_display = args.join(" ");
+        timer.track(
+            &format!("git ls-tree {}", args_display),
+            "rtk git ls-tree",
+            &raw_output,
+            &msg,
+        );
+        return Ok(result.exit_code);
+    }
+
+    // Strip the mode/type/hash prefix from each line so the formatter sees a
+    // flat path list. Empty lines are dropped.
+    let paths: String = raw_output
+        .lines()
+        .map(ls_tree_extract_path)
+        .filter(|p| !p.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("find")
+        .expect("find filter must exist");
+    let formatted = formatter(&paths);
+    print!("{}", formatted);
+
+    let args_display = args.join(" ");
+    timer.track(
+        &format!("git ls-tree {}", args_display),
+        "rtk git ls-tree",
+        &raw_output,
+        &formatted,
+    );
+
+    Ok(result.exit_code)
+}
+
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-files");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-files")?;
+
+    if verbose > 0 {
+        eprintln!("git ls-files executed");
+    }
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let raw_output = result.stdout.clone();
+
+    if ls_files_breaks_format(args) {
+        print!("{}", raw_output);
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git ls-files {}", args_display),
+            &format!("rtk git ls-files {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    if raw_output.trim().is_empty() {
+        let msg = "(no tracked files)".to_string();
+        println!("{}", msg);
+        let args_display = args.join(" ");
+        timer.track(
+            &format!("git ls-files {}", args_display),
+            "rtk git ls-files",
+            &raw_output,
+            &msg,
+        );
+        return Ok(result.exit_code);
+    }
+
+    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("find")
+        .expect("find filter must exist");
+    let formatted = formatter(&raw_output);
+    print!("{}", formatted);
+
+    let args_display = args.join(" ");
+    timer.track(
+        &format!("git ls-files {}", args_display),
+        "rtk git ls-files",
         &raw_output,
         &formatted,
     );
@@ -4894,5 +5146,82 @@ To https://github.com/foo/bar.git
         assert!(git_grep_has_line_number(&["--line-number".to_string()]));
         assert!(!git_grep_has_line_number(&["-l".to_string()]));
         assert!(!git_grep_has_line_number(&["-N".to_string()]));
+    }
+}
+
+    #[test]
+    fn test_ls_tree_extract_path_default_format() {
+        let line = "100644 blob abc123def4567890\tsrc/main.rs";
+        assert_eq!(ls_tree_extract_path(line), "src/main.rs");
+    }
+
+    #[test]
+    fn test_ls_tree_extract_path_name_only() {
+        let line = "src/main.rs";
+        assert_eq!(ls_tree_extract_path(line), "src/main.rs");
+    }
+
+    #[test]
+    fn test_ls_tree_extract_path_with_subtree() {
+        let line = "040000 tree def456\tsrc/lib";
+        assert_eq!(ls_tree_extract_path(line), "src/lib");
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_z() {
+        assert!(ls_tree_breaks_format(&["-z".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_long() {
+        assert!(ls_tree_breaks_format(&["-l".to_string()]));
+        assert!(ls_tree_breaks_format(&["--long".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_object_only() {
+        assert!(ls_tree_breaks_format(&["--object-only".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_abbrev() {
+        assert!(ls_tree_breaks_format(&["--abbrev".to_string()]));
+        assert!(ls_tree_breaks_format(&["--abbrev=8".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_no_break_for_recursive() {
+        // -r is recursive listing — same shape, just more lines.
+        assert!(!ls_tree_breaks_format(&["-r".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_stage() {
+        assert!(ls_files_breaks_format(&["-s".to_string()]));
+        assert!(ls_files_breaks_format(&["--stage".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_z() {
+        assert!(ls_files_breaks_format(&["-z".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_status_tags() {
+        // -t prepends a status letter (H/S/M/...) to each path.
+        assert!(ls_files_breaks_format(&["-t".to_string()]));
+        assert!(ls_files_breaks_format(&["-v".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_debug() {
+        assert!(ls_files_breaks_format(&["--debug".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_no_break_for_pathspec() {
+        // Bare path arguments should not flip to passthrough.
+        assert!(!ls_files_breaks_format(&["src/".to_string()]));
+        assert!(!ls_files_breaks_format(&["--".to_string(), "src/".to_string()]));
     }
 }
