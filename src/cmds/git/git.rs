@@ -27,6 +27,8 @@ pub enum GitCommand {
     Stash { subcommand: Option<String> },
     Worktree,
     Grep,
+    LsTree,
+    LsFiles,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -102,6 +104,8 @@ pub fn run(
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
         GitCommand::Grep => run_grep(args, max_lines, verbose, global_args),
+        GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
     }
 }
 
@@ -1890,6 +1894,189 @@ fn run_grep(
     Ok(result.exit_code)
 }
 
+/// Flags whose presence makes `git ls-tree` output incompatible with the
+/// path-per-line shape `find_wrapper` expects.
+fn ls_tree_breaks_format(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-z" | "-l" | "--long" | "--object-only" | "--abbrev"
+        ) || a.starts_with("--abbrev=")
+    })
+}
+
+/// Flags whose presence makes `git ls-files` output incompatible with the
+/// path-per-line shape `find_wrapper` expects.
+fn ls_files_breaks_format(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-z"
+                | "-s"
+                | "--stage"
+                | "-t"
+                | "-v"
+                | "-c"
+                | "-d"
+                | "-m"
+                | "-u"
+                | "--debug"
+                | "--eol"
+        )
+    })
+}
+
+/// Extract the path portion of a `git ls-tree` line.
+///
+/// Default format: `<mode> SP <type> SP <hash> TAB <path>`. With `--name-only`
+/// the line is just the path. Returns the original line if neither shape matches.
+fn ls_tree_extract_path(line: &str) -> &str {
+    if let Some(tab_pos) = line.find('\t') {
+        &line[tab_pos + 1..]
+    } else {
+        line
+    }
+}
+
+fn run_ls_tree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-tree");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-tree")?;
+
+    if verbose > 0 {
+        eprintln!("git ls-tree executed");
+    }
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let raw_output = result.stdout.clone();
+
+    if ls_tree_breaks_format(args) {
+        print!("{}", raw_output);
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git ls-tree {}", args_display),
+            &format!("rtk git ls-tree {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    if raw_output.trim().is_empty() {
+        let msg = "(empty tree)".to_string();
+        println!("{}", msg);
+        let args_display = args.join(" ");
+        timer.track(
+            &format!("git ls-tree {}", args_display),
+            "rtk git ls-tree",
+            &raw_output,
+            &msg,
+        );
+        return Ok(result.exit_code);
+    }
+
+    let paths: String = raw_output
+        .lines()
+        .map(ls_tree_extract_path)
+        .filter(|p| !p.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("find")
+        .expect("find filter must exist");
+    let formatted = formatter(&paths);
+    print!("{}", formatted);
+
+    let args_display = args.join(" ");
+    timer.track(
+        &format!("git ls-tree {}", args_display),
+        "rtk git ls-tree",
+        &raw_output,
+        &formatted,
+    );
+
+    Ok(result.exit_code)
+}
+
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-files");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-files")?;
+
+    if verbose > 0 {
+        eprintln!("git ls-files executed");
+    }
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let raw_output = result.stdout.clone();
+
+    if ls_files_breaks_format(args) {
+        print!("{}", raw_output);
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git ls-files {}", args_display),
+            &format!("rtk git ls-files {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    if raw_output.trim().is_empty() {
+        let msg = "(no tracked files)".to_string();
+        println!("{}", msg);
+        let args_display = args.join(" ");
+        timer.track(
+            &format!("git ls-files {}", args_display),
+            "rtk git ls-files",
+            &raw_output,
+            &msg,
+        );
+        return Ok(result.exit_code);
+    }
+
+    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("find")
+        .expect("find filter must exist");
+    let formatted = formatter(&raw_output);
+    print!("{}", formatted);
+
+    let args_display = args.join(" ");
+    timer.track(
+        &format!("git ls-files {}", args_display),
+        "rtk git ls-files",
+        &raw_output,
+        &formatted,
+    );
+
+    Ok(result.exit_code)
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3021,5 +3208,78 @@ To https://github.com/foo/bar.git
         assert!(git_grep_has_line_number(&["--line-number".to_string()]));
         assert!(!git_grep_has_line_number(&["-l".to_string()]));
         assert!(!git_grep_has_line_number(&["-N".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_extract_path_default_format() {
+        let line = "100644 blob abc123def4567890\tsrc/main.rs";
+        assert_eq!(ls_tree_extract_path(line), "src/main.rs");
+    }
+
+    #[test]
+    fn test_ls_tree_extract_path_name_only() {
+        let line = "src/main.rs";
+        assert_eq!(ls_tree_extract_path(line), "src/main.rs");
+    }
+
+    #[test]
+    fn test_ls_tree_extract_path_with_subtree() {
+        let line = "040000 tree def456\tsrc/lib";
+        assert_eq!(ls_tree_extract_path(line), "src/lib");
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_z() {
+        assert!(ls_tree_breaks_format(&["-z".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_long() {
+        assert!(ls_tree_breaks_format(&["-l".to_string()]));
+        assert!(ls_tree_breaks_format(&["--long".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_object_only() {
+        assert!(ls_tree_breaks_format(&["--object-only".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_breaks_format_abbrev() {
+        assert!(ls_tree_breaks_format(&["--abbrev".to_string()]));
+        assert!(ls_tree_breaks_format(&["--abbrev=8".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_tree_no_break_for_recursive() {
+        assert!(!ls_tree_breaks_format(&["-r".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_stage() {
+        assert!(ls_files_breaks_format(&["-s".to_string()]));
+        assert!(ls_files_breaks_format(&["--stage".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_z() {
+        assert!(ls_files_breaks_format(&["-z".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_status_tags() {
+        assert!(ls_files_breaks_format(&["-t".to_string()]));
+        assert!(ls_files_breaks_format(&["-v".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_breaks_format_debug() {
+        assert!(ls_files_breaks_format(&["--debug".to_string()]));
+    }
+
+    #[test]
+    fn test_ls_files_no_break_for_pathspec() {
+        assert!(!ls_files_breaks_format(&["src/".to_string()]));
+        assert!(!ls_files_breaks_format(&["--".to_string(), "src/".to_string()]));
     }
 }

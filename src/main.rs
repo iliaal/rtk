@@ -949,6 +949,18 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tree entries: paths grouped by directory (-z, -l, --object-only run raw)
+    LsTree {
+        /// Git ls-tree arguments (tree-ish, paths, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List tracked files: paths grouped by directory (-z, -s, -t, --debug run raw)
+    LsFiles {
+        /// Git ls-files arguments (paths, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1693,6 +1705,20 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Grep { args } => git::run(
                     git::GitCommand::Grep,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::LsTree { args } => git::run(
+                    git::GitCommand::LsTree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::LsFiles { args } => git::run(
+                    git::GitCommand::LsFiles,
                     &args,
                     None,
                     cli.verbose,
