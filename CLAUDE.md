@@ -16,7 +16,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 
 **Verify correct installation:**
 ```bash
-rtk --version  # Should show "rtk 0.28.2" (or newer)
+rtk --version  # Should show "rtk 0.40.0" (or newer)
 rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 
@@ -75,7 +75,7 @@ For the full architecture, component details, and module development patterns, s
 
 Module responsibilities are documented in each folder's `README.md` and each file's `//!` doc header. Browse `src/cmds/*/` to discover available filters.
 
-Supported ecosystems: git/gh/gt, cargo, go/golangci-lint, npm/pnpm/npx, ruff/pytest/pip/mypy, rspec/rubocop/rake, dotnet, playwright/vitest/jest, docker/kubectl/aws.
+Supported ecosystems: git/gh/gt, cargo, go/golangci-lint, npm/pnpm/npx, ruff/pytest/pip/mypy, rspec/rubocop/rake, dotnet, jvm/gradlew, php (phpunit/phpstan/pest/pint/ecs/paratest/phpt/artisan), playwright/vitest/jest, docker/kubectl/aws.
 
 ### Proxy Mode
 
