@@ -312,9 +312,11 @@ fn strip_php_ini_flags(cmd: &str) -> String {
         let t = tokens[i];
         if t == "-d" || t == "-c" {
             i += 2;
-        } else if t == "-n" {
-            i += 1;
-        } else if t.starts_with("-d") || t.starts_with("--define=") || t.starts_with("-c=") {
+        } else if t == "-n"
+            || t.starts_with("-d")
+            || t.starts_with("--define=")
+            || t.starts_with("-c=")
+        {
             i += 1;
         } else {
             break;
@@ -1467,7 +1469,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_git_grep() {
-        let rewritten = rewrite_command("git grep -n foo src/", &[]);
+        let rewritten = rewrite_command_no_prefixes("git grep -n foo src/", &[]);
         assert_eq!(
             rewritten,
             Some("rtk git grep -n foo src/".to_string()),
@@ -1497,13 +1499,13 @@ mod tests {
 
     #[test]
     fn test_rewrite_git_ls_tree() {
-        let rewritten = rewrite_command("git ls-tree -r HEAD", &[]);
+        let rewritten = rewrite_command_no_prefixes("git ls-tree -r HEAD", &[]);
         assert_eq!(rewritten, Some("rtk git ls-tree -r HEAD".to_string()));
     }
 
     #[test]
     fn test_rewrite_git_ls_files() {
-        let rewritten = rewrite_command("git ls-files AGENTS.md CLAUDE.md", &[]);
+        let rewritten = rewrite_command_no_prefixes("git ls-files AGENTS.md CLAUDE.md", &[]);
         assert_eq!(
             rewritten,
             Some("rtk git ls-files AGENTS.md CLAUDE.md".to_string())
@@ -4522,7 +4524,7 @@ mod tests {
     #[test]
     fn test_rewrite_phpunit() {
         assert_eq!(
-            rewrite_command("phpunit tests/", &[]),
+            rewrite_command_no_prefixes("phpunit tests/", &[]),
             Some("rtk phpunit tests/".into())
         );
     }
@@ -4530,7 +4532,7 @@ mod tests {
     #[test]
     fn test_rewrite_vendor_bin_phpunit() {
         assert_eq!(
-            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[]),
+            rewrite_command_no_prefixes("vendor/bin/phpunit --filter EmailTest", &[]),
             Some("rtk phpunit --filter EmailTest".into())
         );
     }
@@ -4560,7 +4562,7 @@ mod tests {
     #[test]
     fn test_rewrite_phpstan_vendor_bin() {
         assert_eq!(
-            rewrite_command("vendor/bin/phpstan analyse src/", &[]),
+            rewrite_command_no_prefixes("vendor/bin/phpstan analyse src/", &[]),
             Some("rtk phpstan analyse src/".into())
         );
     }
@@ -4568,16 +4570,19 @@ mod tests {
     #[test]
     fn test_rewrite_phpstan_php_prefix() {
         assert_eq!(
-            rewrite_command("php vendor/bin/phpstan analyse", &[]),
+            rewrite_command_no_prefixes("php vendor/bin/phpstan analyse", &[]),
             Some("rtk phpstan analyse".into())
         );
     }
 
     #[test]
     fn test_rewrite_phpstan_version_not_rewritten() {
-        assert_eq!(rewrite_command("phpstan --version", &[]), None);
-        assert_eq!(rewrite_command("phpstan list", &[]), None);
-        assert_eq!(rewrite_command("phpstan clear-result-cache", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("phpstan --version", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("phpstan list", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("phpstan clear-result-cache", &[]),
+            None
+        );
     }
 
     #[test]
@@ -4605,11 +4610,11 @@ mod tests {
     #[test]
     fn test_rewrite_phpt() {
         assert_eq!(
-            rewrite_command("php run-tests.php Zend/tests/", &[]),
+            rewrite_command_no_prefixes("php run-tests.php Zend/tests/", &[]),
             Some("rtk phpt Zend/tests/".into())
         );
         assert_eq!(
-            rewrite_command("php ./run-tests.php -q", &[]),
+            rewrite_command_no_prefixes("php ./run-tests.php -q", &[]),
             Some("rtk phpt -q".into())
         );
     }
@@ -4731,7 +4736,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_phpunit_docker_exec() {
         assert_eq!(
-            rewrite_command("docker exec app vendor/bin/phpunit tests/", &[]),
+            rewrite_command_no_prefixes("docker exec app vendor/bin/phpunit tests/", &[]),
             Some("rtk wrap phpunit -- docker exec app vendor/bin/phpunit tests/".into())
         );
     }
@@ -4739,7 +4744,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_phpunit_with_php_prefix() {
         assert_eq!(
-            rewrite_command(
+            rewrite_command_no_prefixes(
                 "docker exec app php -d memory_limit=512M vendor/bin/phpunit --filter FooTest",
                 &[]
             ),
@@ -4753,7 +4758,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_phpstan_compose_exec() {
         assert_eq!(
-            rewrite_command(
+            rewrite_command_no_prefixes(
                 "docker compose exec app php -d memory_limit=512M vendor/bin/phpstan analyse",
                 &[]
             ),
@@ -4767,7 +4772,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_pint_with_flags() {
         assert_eq!(
-            rewrite_command("docker exec app ./vendor/bin/pint --parallel", &[]),
+            rewrite_command_no_prefixes("docker exec app ./vendor/bin/pint --parallel", &[]),
             Some("rtk wrap pint -- docker exec app ./vendor/bin/pint --parallel".into())
         );
     }
@@ -4775,7 +4780,10 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_kubectl_phpt() {
         assert_eq!(
-            rewrite_command("kubectl exec dev-pod -- php run-tests.php Zend/tests/", &[]),
+            rewrite_command_no_prefixes(
+                "kubectl exec dev-pod -- php run-tests.php Zend/tests/",
+                &[]
+            ),
             Some("rtk wrap phpt -- kubectl exec dev-pod -- php run-tests.php Zend/tests/".into())
         );
     }
@@ -4786,7 +4794,7 @@ mod tests {
         // inner commands drop through to the pre-existing `rtk docker` rule
         // that already wraps any `docker exec` invocation.
         assert_eq!(
-            rewrite_command("docker exec app git status", &[]),
+            rewrite_command_no_prefixes("docker exec app git status", &[]),
             Some("rtk docker exec app git status".into())
         );
     }
@@ -4796,7 +4804,7 @@ mod tests {
         // `php artisan` is not in WRAP_SUPPORTED_TOOLS (v1), so we fall
         // through to `rtk docker` rather than producing `rtk wrap`.
         assert_eq!(
-            rewrite_command("docker exec app php artisan migrate", &[]),
+            rewrite_command_no_prefixes("docker exec app php artisan migrate", &[]),
             Some("rtk docker exec app php artisan migrate".into())
         );
     }
@@ -4804,7 +4812,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_php_lint() {
         assert_eq!(
-            rewrite_command("docker exec app php -l src/Foo.php", &[]),
+            rewrite_command_no_prefixes("docker exec app php -l src/Foo.php", &[]),
             Some("rtk wrap php-lint -- docker exec app php -l src/Foo.php".into())
         );
     }
@@ -4812,7 +4820,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_php_lint_with_ini_flags() {
         assert_eq!(
-            rewrite_command(
+            rewrite_command_no_prefixes(
                 "docker exec app php -ddisable_functions= -l src/Foo.php",
                 &[]
             ),
@@ -4826,7 +4834,7 @@ mod tests {
     #[test]
     fn test_rewrite_wrapped_php_lint_long_form() {
         assert_eq!(
-            rewrite_command("docker exec app php --syntax-check src/Foo.php", &[]),
+            rewrite_command_no_prefixes("docker exec app php --syntax-check src/Foo.php", &[]),
             Some("rtk wrap php-lint -- docker exec app php --syntax-check src/Foo.php".into())
         );
     }
