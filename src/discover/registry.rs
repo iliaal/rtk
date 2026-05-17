@@ -4211,7 +4211,7 @@ mod tests {
     #[test]
     fn test_rewrite_phpunit() {
         assert_eq!(
-            rewrite_command("phpunit tests/", &[]),
+            rewrite_command_no_prefixes("phpunit tests/", &[]),
             Some("rtk phpunit tests/".into())
         );
     }
@@ -4219,7 +4219,7 @@ mod tests {
     #[test]
     fn test_rewrite_vendor_bin_phpunit() {
         assert_eq!(
-            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[]),
+            rewrite_command_no_prefixes("vendor/bin/phpunit --filter EmailTest", &[]),
             Some("rtk phpunit --filter EmailTest".into())
         );
     }
@@ -4249,7 +4249,7 @@ mod tests {
     #[test]
     fn test_rewrite_phpstan_vendor_bin() {
         assert_eq!(
-            rewrite_command("vendor/bin/phpstan analyse src/", &[]),
+            rewrite_command_no_prefixes("vendor/bin/phpstan analyse src/", &[]),
             Some("rtk phpstan analyse src/".into())
         );
     }
@@ -4257,16 +4257,19 @@ mod tests {
     #[test]
     fn test_rewrite_phpstan_php_prefix() {
         assert_eq!(
-            rewrite_command("php vendor/bin/phpstan analyse", &[]),
+            rewrite_command_no_prefixes("php vendor/bin/phpstan analyse", &[]),
             Some("rtk phpstan analyse".into())
         );
     }
 
     #[test]
     fn test_rewrite_phpstan_version_not_rewritten() {
-        assert_eq!(rewrite_command("phpstan --version", &[]), None);
-        assert_eq!(rewrite_command("phpstan list", &[]), None);
-        assert_eq!(rewrite_command("phpstan clear-result-cache", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("phpstan --version", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("phpstan list", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("phpstan clear-result-cache", &[]),
+            None
+        );
     }
 
     #[test]
