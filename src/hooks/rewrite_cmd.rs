@@ -125,11 +125,14 @@ mod tests {
             );
         }
 
+        // These two assert the command is *rewritten* (not Passthrough), in
+        // contrast to the unattestable cases above. Allow vs Ask depends on the
+        // host's live permission settings, so accept either.
         #[test]
         fn test_fd_dup_redirect_still_rewrites() {
             assert!(matches!(
                 evaluate("git status 2>&1", &[], &[]),
-                RewriteOutcome::Ask(_)
+                RewriteOutcome::Ask(_) | RewriteOutcome::Allow(_)
             ));
         }
 
@@ -137,7 +140,7 @@ mod tests {
         fn test_plain_command_still_rewrites() {
             assert!(matches!(
                 evaluate("git status", &[], &[]),
-                RewriteOutcome::Ask(_)
+                RewriteOutcome::Ask(_) | RewriteOutcome::Allow(_)
             ));
         }
     }

@@ -1253,6 +1253,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
+    "wrap",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -3045,6 +3046,15 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "make",
+            "php",
+            "phpunit",
+            "phpstan",
+            "pest",
+            "paratest",
+            "ecs",
+            "pint",
+            "phpt",
         ];
 
         let unclassified: Vec<String> = Cli::command()
