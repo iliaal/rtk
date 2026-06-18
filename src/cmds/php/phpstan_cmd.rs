@@ -117,7 +117,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 // ── JSON filtering ───────────────────────────────────────────────────────────
 
-fn filter_phpstan_json(output: &str) -> String {
+pub(crate) fn filter_phpstan_json(output: &str) -> String {
     if output.trim().is_empty() {
         return "PHPStan: No output".to_string();
     }
@@ -187,7 +187,7 @@ fn filter_phpstan_json(output: &str) -> String {
 
 // ── Text fallback ────────────────────────────────────────────────────────────
 
-fn filter_phpstan_text(output: &str) -> String {
+pub(crate) fn filter_phpstan_text(output: &str) -> String {
     // Check for errors first
     for line in output.lines() {
         let t = line.trim();
@@ -210,13 +210,15 @@ fn filter_phpstan_text(output: &str) -> String {
         }
     }
 
-    // Extract summary if present
+    // Extract summary if present. Match case-insensitively: phpstan prints
+    // "[ERROR] Found N errors" / "[OK] No errors" with varying capitalization.
     for line in output.lines().rev() {
         let t = line.trim();
-        if t.contains("[OK]") || t.contains("No errors") {
+        let lower = t.to_lowercase();
+        if lower.contains("[ok]") || lower.contains("no errors") {
             return "phpstan: ok".to_string();
         }
-        if t.contains("errors") && (t.contains("found") || t.contains("in")) {
+        if lower.contains("error") && (lower.contains("found") || lower.contains("in")) {
             return format!("PHPStan: {}", t);
         }
     }
@@ -450,6 +452,15 @@ Found 5 errors in 3 files"#;
         assert!(result.starts_with("PHPStan:"), "should have PHPStan: prefix");
         assert!(result.contains("5 errors"), "should contain error count");
         assert!(result.contains("3 files"), "should contain file count");
+    }
+
+    #[test]
+    fn test_filter_phpstan_text_error_summary_case_insensitive() {
+        // phpstan prints "[ERROR] Found N errors" — capital F and no " in ",
+        // so the summary must be matched case-insensitively (regression guard).
+        let text = " ------\n  42   problem\n ------\n\n [ERROR] Found 2 errors\n";
+        let result = filter_phpstan_text(text);
+        assert_eq!(result, "PHPStan: [ERROR] Found 2 errors");
     }
 
     #[test]
