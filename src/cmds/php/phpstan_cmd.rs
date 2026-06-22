@@ -23,8 +23,10 @@ struct PhpstanOutput {
 
 #[derive(Deserialize)]
 struct PhpstanTotals {
+    // `errors` counts only non-file-specific (global/config) errors; per-file
+    // errors live in `file_errors`. Gating "ok" on `errors` alone hides real
+    // failures, since a normal failing run reports errors=0, file_errors=N.
     errors: usize,
-    #[allow(dead_code)]
     file_errors: usize,
 }
 
@@ -131,14 +133,14 @@ pub(crate) fn filter_phpstan_json(output: &str) -> String {
         }
     };
 
-    // No errors case
-    if phpstan.totals.errors == 0 {
+    // No errors case: both file-specific and global error counts must be zero.
+    if phpstan.totals.file_errors == 0 && phpstan.totals.errors == 0 {
         return "phpstan: ok".to_string();
     }
 
     let mut result = format!(
         "phpstan: {} errors in {} files\n",
-        phpstan.totals.errors,
+        phpstan.totals.file_errors,
         phpstan.files.len()
     );
 
@@ -350,6 +352,28 @@ mod tests {
     fn test_filter_phpstan_json_no_errors() {
         let result = filter_phpstan_json(no_errors_json());
         assert_eq!(result, "phpstan: ok");
+    }
+
+    #[test]
+    fn test_filter_phpstan_file_errors_not_hidden() {
+        // Real failing runs report errors=0 (no global errors) with the count
+        // in file_errors. Gating "ok" on `errors` alone silently hid failures.
+        let json = r#"{
+          "totals": {"errors": 0, "file_errors": 2},
+          "files": {
+            "app/Models/User.php": {
+              "errors": 2,
+              "messages": [
+                {"message": "Property $id does not accept null.", "line": 10, "ignorable": true},
+                {"message": "Call to undefined method.", "line": 25, "ignorable": false}
+              ]
+            }
+          },
+          "errors": []
+        }"#;
+        let result = filter_phpstan_json(json);
+        assert!(result.starts_with("phpstan: 2 errors in 1 files"), "got: {}", result);
+        assert!(result.contains("app/Models/User.php (2 errors)"), "got: {}", result);
     }
 
     #[test]

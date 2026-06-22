@@ -23,8 +23,11 @@ struct PintOutput {
 
 #[derive(Deserialize)]
 struct PintFile {
+    // Pint ≥ ~1.14 renamed the JSON keys: name→path, appliedFixers→fixers.
+    // Aliases keep both schemas parsing so output stays compressed across versions.
+    #[serde(alias = "path")]
     name: String,
-    #[serde(rename = "appliedFixers")]
+    #[serde(rename = "appliedFixers", alias = "fixers")]
     applied_fixers: Vec<String>,
 }
 
@@ -155,6 +158,17 @@ mod tests {
         assert!(result.contains("app/Foo.php (2)"), "got: {}", result);
         assert!(result.contains("no_unused_imports"), "got: {}", result);
         assert!(result.contains("ordered_imports"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_pint_current_schema_path_fixers() {
+        // Pint ≥ ~1.14 emits path/fixers instead of name/appliedFixers.
+        // Without aliases this fell back to raw output (no compression).
+        let json = r#"{"result":"fail","files":[{"path":"app/Foo.php","fixers":["concat_space","ordered_imports"]}]}"#;
+        let result = filter_pint_json(json);
+        assert!(result.contains("2 changes in 1 files"), "got: {}", result);
+        assert!(result.contains("app/Foo.php (2)"), "got: {}", result);
+        assert!(result.contains("concat_space"), "got: {}", result);
     }
 
     #[test]
