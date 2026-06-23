@@ -558,6 +558,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &[
             "php vendor/bin/phpunit",
             "php bin/phpunit",
+            "./vendor/bin/phpunit",
             "vendor/bin/phpunit",
             "bin/phpunit",
             "phpunit",
@@ -584,7 +585,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^(?:vendor/bin/)?pest(?:\s|$)",
         rtk_cmd: "rtk pest",
-        rewrite_prefixes: &["vendor/bin/pest", "pest"],
+        rewrite_prefixes: &["./vendor/bin/pest", "vendor/bin/pest", "pest"],
         category: "Tests",
         savings_pct: 80.0,
         subcmd_savings: &[],
@@ -593,7 +594,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^(?:vendor/bin/)?paratest(?:\s|$)",
         rtk_cmd: "rtk paratest",
-        rewrite_prefixes: &["vendor/bin/paratest", "paratest"],
+        rewrite_prefixes: &["./vendor/bin/paratest", "vendor/bin/paratest", "paratest"],
         category: "Tests",
         savings_pct: 80.0,
         subcmd_savings: &[],
@@ -602,7 +603,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^(?:vendor/bin/)?ecs(?:\s|$)",
         rtk_cmd: "rtk ecs",
-        rewrite_prefixes: &["vendor/bin/ecs", "ecs"],
+        rewrite_prefixes: &["./vendor/bin/ecs", "vendor/bin/ecs", "ecs"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
@@ -611,7 +612,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^(?:vendor/bin/)?pint(?:\s|$)",
         rtk_cmd: "rtk pint",
-        rewrite_prefixes: &["vendor/bin/pint", "pint"],
+        rewrite_prefixes: &["./vendor/bin/pint", "vendor/bin/pint", "pint"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],

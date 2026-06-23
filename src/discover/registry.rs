@@ -4538,6 +4538,33 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_dotslash_vendor_bin() {
+        // `./vendor/bin/<tool>` is the common Laravel invocation form. classify
+        // normalizes the leading `./`, but the rewrite strips literal prefixes,
+        // so the `./vendor/bin/<tool>` prefix must be present or rewrite no-ops.
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/pint --test", &[]),
+            Some("rtk pint --test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/pest tests/", &[]),
+            Some("rtk pest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/paratest", &[]),
+            Some("rtk paratest".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/ecs check", &[]),
+            Some("rtk ecs check".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
+
+    #[test]
     fn test_classify_phpstan() {
         assert!(matches!(
             classify_command("vendor/bin/phpstan analyse src/"),
