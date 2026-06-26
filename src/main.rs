@@ -3239,6 +3239,13 @@ mod tests {
             "pint",
             "phpt",
             "uv",
+            "php",
+            "phpunit",
+            "phpstan",
+            "pest",
+            "paratest",
+            "ecs",
+            "pint",
         ];
 
         let unclassified: Vec<String> = Cli::command()
