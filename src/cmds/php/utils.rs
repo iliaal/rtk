@@ -12,12 +12,11 @@ lazy_static! {
 pub fn php_tool_command(tool: &str) -> Command {
     for local_tool in composer_tool_paths(tool) {
         let local_tool_name = local_tool.to_string_lossy().into_owned();
-        if let Ok(resolved_tool) = resolve_binary(&local_tool_name) {
-            return Command::new(resolved_tool);
-        }
-
-        if local_tool.exists() {
-            return Command::new(local_tool);
+        // Route through resolved_command (the sanctioned constructor) rather than
+        // a raw dynamic command constructor, so the binary still resolves
+        // PATHEXT-aware on Windows and the security scan's no-dynamic-exec rule holds.
+        if resolve_binary(&local_tool_name).is_ok() || local_tool.exists() {
+            return resolved_command(&local_tool_name);
         }
     }
 
