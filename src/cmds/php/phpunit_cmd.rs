@@ -8,9 +8,18 @@
 use super::utils::php_tool_command;
 use crate::core::runner;
 use anyhow::Result;
+use lazy_static::lazy_static;
+use regex::Regex;
 
 const MAX_FAILURES_SHOWN: usize = 10;
 const MAX_DETAIL_LINES_PER_FAILURE: usize = 2;
+
+lazy_static! {
+    // PHPUnit prints each failure heading as "N) Class::method". Anchor to that
+    // exact shape so detail lines that merely start with a digit and contain ')'
+    // (e.g. "5 of 10 assertions passed in Foo::bar()") don't split a block.
+    static ref FAILURE_HEADING_RE: Regex = Regex::new(r"^\d+\) \S").unwrap();
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = php_tool_command("phpunit");
@@ -90,10 +99,7 @@ pub(crate) fn filter_phpunit_output(output: &str) -> String {
 }
 
 fn is_numbered_failure_heading(line: &str) -> bool {
-    // PHPUnit formats each failure as "N) Class::method"
-    let mut chars = line.chars();
-    let first_digit = chars.next().is_some_and(|c| c.is_ascii_digit());
-    first_digit && line.contains(')')
+    FAILURE_HEADING_RE.is_match(line)
 }
 
 fn build_success_with_skipped(output: &str) -> String {
@@ -177,6 +183,21 @@ fn parse_counts(output: &str) -> (usize, usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_numbered_failure_heading_anchored() {
+        // Real PHPUnit failure headings match.
+        assert!(is_numbered_failure_heading("1) App\\Tests\\UserTest::testEmail"));
+        assert!(is_numbered_failure_heading("12) Foo::bar"));
+        // Detail lines that merely start with a digit and contain ')' must not.
+        assert!(!is_numbered_failure_heading(
+            "5 of 10 assertions passed in Foo::bar()"
+        ));
+        assert!(!is_numbered_failure_heading("1)")); // no method after ") "
+        assert!(!is_numbered_failure_heading(
+            "Failed asserting that Array(3) is identical."
+        ));
+    }
 
     const REAL_PHPUNIT_FAILURE: &str = r#"PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
 
