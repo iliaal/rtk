@@ -4,12 +4,12 @@
 //! file and sorted by error count. Falls back to text parsing when the user
 //! specifies a custom format or when injected JSON output fails to parse.
 
+use super::utils::php_tool_command;
 use crate::core::runner;
-use crate::core::utils::{exit_code_from_status, resolved_command};
+use crate::core::utils::exit_code_from_status;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
 
 // ── JSON structures matching PHPStan's --error-format=json output ───────────
 
@@ -48,12 +48,9 @@ struct PhpstanMessage {
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    // Check for vendor/bin/phpstan first
-    let mut cmd = if Path::new("vendor/bin/phpstan").exists() {
-        resolved_command("vendor/bin/phpstan")
-    } else {
-        resolved_command("phpstan")
-    };
+    // Composer-aware resolution (COMPOSER_BIN_DIR / config.bin-dir), matching
+    // the other php tools, with PATH fallback for a global install.
+    let mut cmd = php_tool_command("phpstan");
 
     // Utility commands (--version, list, clear-result-cache, worker, …): real passthrough.
     // Only analyse/analyze subcommands get filtered and token-tracked.
@@ -193,10 +190,12 @@ pub(crate) fn filter_phpstan_text(output: &str) -> String {
     // Check for errors first
     for line in output.lines() {
         let t = line.trim();
-        if t.contains("cannot load such file")
-            || t.contains("not found")
-            || t.starts_with("phpstan: command not found")
+        // Shell-level "binary missing" lines only. A substring match on
+        // "not found" would swallow real analysis output ("Class X not found").
+        if t.starts_with("phpstan: command not found")
             || t.starts_with("phpstan: No such file")
+            || t.starts_with("sh: ")
+            || t.starts_with("bash: ")
         {
             let error_lines: Vec<&str> = output.trim().lines().take(20).collect();
             let truncated = error_lines.join("\n");
@@ -229,35 +228,11 @@ pub(crate) fn filter_phpstan_text(output: &str) -> String {
     crate::core::utils::fallback_tail(output, "phpstan", 20)
 }
 
-/// Compact PHP file path by finding the nearest conventional directory
-/// and stripping the absolute path prefix.
+/// Compact a PHP file path to its last two components (`dir/File.php`),
+/// which is enough context across frameworks without a per-convention list.
 fn compact_php_path(path: &str) -> String {
     let path = path.replace('\\', "/");
 
-    for prefix in &[
-        "app/Models/",
-        "app/Http/Controllers/",
-        "app/Http/Middleware/",
-        "app/Services/",
-        "app/Repositories/",
-        "src/",
-        "tests/",
-        "config/",
-        "database/",
-    ] {
-        if let Some(pos) = path.find(prefix) {
-            return path[pos..].to_string();
-        }
-    }
-
-    // Generic: strip up to last known directory marker
-    if let Some(pos) = path.rfind("/app/") {
-        return path[pos + 1..].to_string();
-    }
-    if let Some(pos) = path.rfind("/src/") {
-        return path[pos + 1..].to_string();
-    }
-    // Keep last 2 path components to preserve context (dir/File.php)
     if let Some(pos) = path.rfind('/') {
         if let Some(prev) = path[..pos].rfind('/') {
             return path[prev + 1..].to_string();
@@ -373,7 +348,7 @@ mod tests {
         }"#;
         let result = filter_phpstan_json(json);
         assert!(result.starts_with("phpstan: 2 errors in 1 files"), "got: {}", result);
-        assert!(result.contains("app/Models/User.php (2 errors)"), "got: {}", result);
+        assert!(result.contains("Models/User.php (2 errors)"), "got: {}", result);
     }
 
     #[test]
@@ -383,10 +358,10 @@ mod tests {
         // Check summary line
         assert!(result.contains("5 errors in 3 files"));
 
-        // Check file names are present
-        assert!(result.contains("app/Models/User.php"));
-        assert!(result.contains("app/Http/Controllers/UserController.php"));
-        assert!(result.contains("app/Services/AuthService.php"));
+        // Check file names are present (compacted to last two components)
+        assert!(result.contains("Models/User.php"));
+        assert!(result.contains("Controllers/UserController.php"));
+        assert!(result.contains("Services/AuthService.php"));
 
         // Check line numbers and messages
         assert!(result.contains(":10 Property $id does not accept null."));
@@ -401,8 +376,8 @@ mod tests {
         // Should show max 10 files
         assert!(result.contains("+2 more files"));
 
-        // Should not show all 12 files inline
-        let file_count = result.matches("app/Models/Model").count();
+        // Should not show all 12 files inline (paths compacted to last 2 components)
+        let file_count = result.matches("Models/Model").count();
         assert_eq!(file_count, 10, "Should show exactly 10 files");
     }
 
@@ -443,11 +418,11 @@ mod tests {
     fn test_compact_php_path() {
         assert_eq!(
             compact_php_path("/var/www/project/app/Models/User.php"),
-            "app/Models/User.php"
+            "Models/User.php"
         );
         assert_eq!(
             compact_php_path("app/Http/Controllers/UserController.php"),
-            "app/Http/Controllers/UserController.php"
+            "Controllers/UserController.php"
         );
         assert_eq!(
             compact_php_path("/home/user/project/src/Service.php"),
@@ -455,7 +430,7 @@ mod tests {
         );
         assert_eq!(
             compact_php_path("tests/Unit/UserTest.php"),
-            "tests/Unit/UserTest.php"
+            "Unit/UserTest.php"
         );
     }
 
@@ -479,6 +454,25 @@ Found 5 errors in 3 files"#;
     }
 
     #[test]
+    fn test_filter_phpstan_text_not_found_in_analysis_not_swallowed() {
+        // "not found" appears in real analysis messages. The text fallback must
+        // report the summary, not mistake it for a missing-binary shell error.
+        let text = r#"Note: Using configuration file phpstan.neon.
+
+ ------ -----------------------------------------------
+  Line   app/Foo.php
+ ------ -----------------------------------------------
+  10     Class 'NotFoundHttpException' not found.
+  25     Method 'findById' not found in class 'UserRepository'.
+ ------ -----------------------------------------------
+
+ [ERROR] Found 2 errors
+"#;
+        let result = filter_phpstan_text(text);
+        assert_eq!(result, "PHPStan: [ERROR] Found 2 errors");
+    }
+
+    #[test]
     fn test_filter_phpstan_text_error_summary_case_insensitive() {
         // phpstan prints "[ERROR] Found N errors" — capital F and no " in ",
         // so the summary must be matched case-insensitively (regression guard).
@@ -495,7 +489,7 @@ Found 5 errors in 3 files"#;
 
         assert!(output.contains("47 errors in 14 files"));
         // Files are sorted by error count descending — User.php has 6, comes first
-        assert!(output.contains("app/Models/User.php (6 errors)"));
+        assert!(output.contains("Models/User.php (6 errors)"));
         // 14 files → only 10 shown, 4 more
         assert!(output.contains("+4 more files"));
     }
