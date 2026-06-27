@@ -100,8 +100,17 @@ pub(crate) fn filter_pint_json(output: &str) -> String {
 
     let mut result = format!("pint: {} changes in {} files\n", total_rules, total_files);
 
+    // Resolve cwd once; short_path() used to re-syscall current_dir() per file.
+    let cwd_prefix = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok())
+        .map(|s| format!("{}/", s));
+
     for file in files.iter().take(MAX_FILES_SHOWN) {
-        let name = short_path(&file.name);
+        let name = cwd_prefix
+            .as_deref()
+            .and_then(|c| file.name.strip_prefix(c))
+            .unwrap_or(&file.name);
         result.push_str(&format!("\n{} ({})\n", name, file.applied_fixers.len()));
         for rule in file.applied_fixers.iter().take(MAX_RULES_PER_FILE) {
             result.push_str(&format!("  - {}\n", rule));
@@ -122,18 +131,6 @@ pub(crate) fn filter_pint_json(output: &str) -> String {
     }
 
     result.trim().to_string()
-}
-
-fn short_path(path: &str) -> String {
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(cwd_str) = cwd.into_os_string().into_string() {
-            let with_sep = format!("{}/", cwd_str);
-            if let Some(rest) = path.strip_prefix(&with_sep) {
-                return rest.to_string();
-            }
-        }
-    }
-    path.to_string()
 }
 
 #[cfg(test)]
