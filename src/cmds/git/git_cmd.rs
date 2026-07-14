@@ -322,7 +322,6 @@ fn args_without_patch_shape(args: &[String], tokens: &[Token<'_>]) -> Vec<String
     }
     out
 }
-
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -7260,7 +7259,6 @@ To https://github.com/foo/bar.git
         assert!(!git_grep_has_line_number(&["-l".to_string()]));
         assert!(!git_grep_has_line_number(&["-N".to_string()]));
     }
-}
 
     #[test]
     fn test_ls_tree_extract_path_default_format() {
