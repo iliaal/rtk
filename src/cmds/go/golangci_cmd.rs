@@ -177,7 +177,11 @@ pub(crate) fn parse_major_version(version_output: &str) -> u32 {
 /// Run `golangci-lint --version` and return the major version number.
 /// Returns 1 on any failure.
 pub(crate) fn detect_major_version() -> u32 {
-    let mut cmd = resolved_command("golangci-lint");
+    // A missing binary is "any failure" per the contract above; the real run
+    // will report it properly.
+    let Ok(mut cmd) = resolved_command("golangci-lint") else {
+        return 1;
+    };
     cmd.arg("--version");
 
     match exec_capture(&mut cmd) {
@@ -205,7 +209,7 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
     let version = detect_major_version();
 
     let filtered_args = build_filtered_args(invocation, version);
-    let mut cmd = resolved_command("golangci-lint");
+    let mut cmd = resolved_command("golangci-lint")?;
     for arg in &filtered_args {
         cmd.arg(arg);
     }
