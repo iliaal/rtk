@@ -28,15 +28,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "mypy",
         &args.join(" "),
-        |raw, exit_code| {
-            let clean = strip_ansi(raw);
-            let filtered = filter_mypy_output(&clean);
-            // Nothing recognised on a failed run means mypy never type-checked.
-            if exit_code != 0 && filtered == MYPY_CLEAN {
-                return clean.trim().to_string();
-            }
-            filtered
-        },
+        |raw, exit_code| filter_mypy_output(&strip_ansi(raw), exit_code),
         runner::RunOptions::default(),
     )
 }
@@ -51,7 +43,7 @@ struct MypyError {
     context_lines: Vec<String>,
 }
 
-pub fn filter_mypy_output(output: &str) -> String {
+pub fn filter_mypy_output(output: &str, exit_code: i32) -> String {
     // file.py:12: error: Message [error-code]
     // file.py:12:5: error: Message [error-code]
     static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
@@ -134,10 +126,26 @@ pub fn filter_mypy_output(output: &str) -> String {
         }
     }
 
-    // No errors at all
+    // Nothing recognisable was parsed.
     if errors.is_empty() && fileless_lines.is_empty() {
-        if output.contains("Success: no issues found") || output.contains("no issues found") {
+        // mypy said so itself: a truthful pass.
+        if output.contains("no issues found") {
             return MYPY_CLEAN.to_string();
+        }
+        // mypy never claimed success and we parsed nothing we recognise. If the
+        // run also failed, "No issues found" is a fabricated pass: with mypy not
+        // installed, rtk falls back to `python3 -m mypy`, python3 resolves, and
+        // the real answer ("No module named mypy") is the only thing on the
+        // stream. Reporting a clean bill of health for a linter that never ran
+        // is the worst output this filter can produce, so hand back what the
+        // command actually said.
+        if exit_code != 0 {
+            let raw = output.trim();
+            return if raw.is_empty() {
+                format!("mypy: failed (exit {}), no output", exit_code)
+            } else {
+                format!("mypy: did not report status (exit {})\n{}", exit_code, raw)
+            };
         }
         return MYPY_CLEAN.to_string();
     }
@@ -234,7 +242,7 @@ src/models/user.py:10: error: Incompatible types in assignment  [assignment]
 src/models/user.py:20: error: Missing return statement  [return]
 Found 5 errors in 2 files (checked 10 source files)
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(result.contains("mypy: 5 errors in 2 files"));
         // user.py has 3 errors, auth.py has 2 -- user.py should come first
         let user_pos = result.find("user.py").unwrap();
@@ -252,7 +260,7 @@ Found 5 errors in 2 files (checked 10 source files)
         let output = "\
 src/api.py:10:5: error: Incompatible return value type  [return-value]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(result.contains("L10:"));
         assert!(result.contains("[return-value]"));
         assert!(result.contains("Incompatible return value type"));
@@ -268,7 +276,7 @@ b.py:1: error: Error four  [name-defined]
 c.py:1: error: Error five  [arg-type]
 Found 5 errors in 3 files
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(result.contains("Top codes:"));
         assert!(result.contains("return-value (3x)"));
         assert!(result.contains("name-defined (1x)"));
@@ -283,7 +291,7 @@ a.py:2: error: Error two  [return-value]
 b.py:1: error: Error three  [return-value]
 Found 3 errors in 2 files
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(
             !result.contains("Top codes:"),
             "Top codes should not appear with only one distinct code"
@@ -297,7 +305,7 @@ src/api.py:10: error: Type \"str\" not assignable to \"int\"  [assignment]
 src/api.py:20: error: Missing return statement  [return]
 src/api.py:30: error: Name \"bar\" is not defined  [name-defined]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(result.contains("Type \"str\" not assignable to \"int\""));
         assert!(result.contains("Missing return statement"));
         assert!(result.contains("Name \"bar\" is not defined"));
@@ -314,7 +322,7 @@ src/app.py:10: note: Expected type \"int\"
 src/app.py:10: note: Got type \"str\"
 src/app.py:20: error: Missing return statement  [return]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert!(result.contains("Incompatible types in assignment"));
         assert!(result.contains("Expected type \"int\""));
         assert!(result.contains("Got type \"str\""));
@@ -329,7 +337,7 @@ mypy: error: No module named 'nonexistent'
 src/api.py:10: error: Name \"foo\" is not defined  [name-defined]
 Found 1 error in 1 file
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         // File-less error should appear verbatim before grouped output
         assert!(result.contains("mypy: error: No module named 'nonexistent'"));
         assert!(result.contains("api.py (1 error"));
@@ -342,9 +350,38 @@ Found 1 error in 1 file
     }
 
     #[test]
+    fn test_filter_mypy_does_not_fabricate_a_pass_when_it_never_ran() {
+        // With mypy uninstalled, rtk falls back to `python3 -m mypy`; python3
+        // resolves, so nothing raises CommandNotFound and this text plus a
+        // non-zero exit is the entire evidence. Reporting "No issues found"
+        // here tells the caller a linter that never ran found nothing wrong.
+        let output = "/usr/bin/python3: No module named mypy\n";
+        let result = filter_mypy_output(output, 1);
+        assert!(
+            !result.contains("No issues found"),
+            "fabricated a pass for a tool that never ran: {}",
+            result
+        );
+        assert!(result.contains("No module named mypy"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_mypy_trusts_mypys_own_success_marker_on_nonzero_exit() {
+        // mypy said it succeeded; believe it even if the exit code is odd.
+        let output = "Success: no issues found in 5 source files\n";
+        assert_eq!(filter_mypy_output(output, 1), "mypy: No issues found");
+    }
+
+    #[test]
+    fn test_filter_mypy_clean_exit_with_no_output_is_still_a_pass() {
+        // Exit 0 and nothing parsed: no reason to doubt it.
+        assert_eq!(filter_mypy_output("", 0), "mypy: No issues found");
+    }
+
+    #[test]
     fn test_filter_mypy_no_errors() {
         let output = "Success: no issues found in 5 source files\n";
-        let result = filter_mypy_output(output);
+        let result = filter_mypy_output(output, 0);
         assert_eq!(result, "mypy: No issues found");
     }
 
@@ -358,7 +395,7 @@ Found 1 error in 1 file
             ));
         }
         output.push_str("Found 15 errors in 15 files\n");
-        let result = filter_mypy_output(&output);
+        let result = filter_mypy_output(&output, 0);
         assert!(result.contains("15 errors in 15 files"));
         for i in 1..=15 {
             assert!(

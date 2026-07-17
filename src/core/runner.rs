@@ -88,6 +88,26 @@ pub enum RunMode<'a> {
     Passthrough,
 }
 
+/// The command failed and produced nothing for the filter to read, but did say
+/// why on stderr.
+///
+/// A filter handed an empty stream renders "clean" out of nothing, so without
+/// this the summary becomes a fabricated pass — the most dangerous output rtk
+/// can produce. Observed with the tool absent: `rtk mypy .` printed
+/// "mypy: No issues found" and `rtk vitest` printed "PASS (0) FAIL (0)".
+/// Neither tool ran at all; both filters fall back to `python3 -m mypy` / `npx`,
+/// which *do* resolve, so the real failure ("No module named mypy") existed only
+/// on stderr — which `filter_stdout_only` captures and then drops.
+///
+/// Keying on the filter's *input* being empty is what makes this safe. A
+/// genuinely failing run (tests red, linter found issues) puts its output on
+/// stdout, so it never trips this and still gets filtered, which is the filter's
+/// whole job. Only "produced nothing and failed" reaches here, and for that the
+/// stderr is the entire answer.
+pub(crate) fn is_silent_failure(exit_code: i32, filter_input: &str, stderr: &str) -> bool {
+    exit_code != 0 && filter_input.trim().is_empty() && !stderr.trim().is_empty()
+}
+
 fn run_captured_filter<F>(
     mut cmd: Command,
     tool_name: &str,
@@ -127,6 +147,13 @@ where
     } else {
         raw
     };
+
+    if is_silent_failure(exit_code, text_to_filter, &result.raw_stderr) {
+        eprint!("{}", result.raw_stderr);
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        return Ok(exit_code);
+    }
+
     let filtered = filter_fn(text_to_filter, exit_code);
 
     let raw_for_tracking = if opts.filter_stdout_only {
@@ -283,4 +310,50 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_silent_failure_detects_tool_that_never_ran() {
+        // `rtk mypy .` with mypy uninstalled: the python3 fallback resolves, so
+        // no CommandNotFound fires; the tool's absence exists only as stderr.
+        assert!(is_silent_failure(
+            1,
+            "",
+            "/usr/bin/python3: No module named mypy\n"
+        ));
+        // Whitespace-only stdout is still nothing to filter.
+        assert!(is_silent_failure(
+            1,
+            "  \n\n",
+            "npm ERR! could not determine executable\n"
+        ));
+    }
+
+    #[test]
+    fn test_silent_failure_leaves_real_red_runs_to_the_filter() {
+        // The case that must NOT trip: tests ran and failed. Non-zero exit is
+        // normal here and stdout carries the failures — filtering this is the
+        // entire point of the tool.
+        assert!(!is_silent_failure(
+            1,
+            "FAIL src/foo.test.ts\n  expected 1 to be 2\n",
+            "stderr noise\n"
+        ));
+        // A linter reporting findings on stdout, exit 1.
+        assert!(!is_silent_failure(1, "foo.py:1: error: bad\n", ""));
+    }
+
+    #[test]
+    fn test_silent_failure_ignores_success_and_silent_stderr() {
+        // Clean run producing nothing: "no issues" is a truthful summary.
+        assert!(!is_silent_failure(0, "", "some warning\n"));
+        // Failed, empty stdout, but no stderr either: nothing to surface, so
+        // let the filter render whatever it renders for an empty stream.
+        assert!(!is_silent_failure(1, "", ""));
+        assert!(!is_silent_failure(1, "", "   \n"));
+    }
 }

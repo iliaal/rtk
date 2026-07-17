@@ -24,7 +24,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "git-diff" => Some(git_diff_wrapper),
         "git-status" => Some(git_status_wrapper),
         "log" => Some(crate::cmds::system::log_cmd::run_stdin_str),
-        "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
+        "mypy" => Some(mypy_wrapper),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
@@ -71,6 +71,13 @@ fn pint_wrapper(input: &str) -> String {
     } else {
         crate::core::utils::fallback_tail(input, "pint", 60)
     }
+}
+
+/// Pipe entry: stdin carries text only, so there is no exit code to consult.
+/// Assume the tool ran (0). Fabricating a failure here would be as wrong as
+/// fabricating a pass, and the caller chose to hand us bare text.
+fn mypy_wrapper(input: &str) -> String {
+    crate::cmds::python::mypy_cmd::filter_mypy_output(input, 0)
 }
 
 fn vitest_wrapper(input: &str) -> String {
@@ -198,7 +205,7 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
-        return crate::cmds::python::mypy_cmd::filter_mypy_output;
+        return mypy_wrapper;
     }
 
     // grep/rg: lines matching file:number:content
