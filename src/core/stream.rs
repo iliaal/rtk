@@ -301,7 +301,8 @@ pub fn run_streaming(
         };
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
-        let status = cmd.status().context("Failed to spawn process")?;
+        let program = program_of(cmd);
+        let status = cmd.status().map_err(|e| exec_error(&program, e))?;
         return Ok(StreamResult {
             exit_code: status_to_exit_code(status),
             raw: String::new(),
@@ -331,7 +332,8 @@ pub fn run_streaming(
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
-    let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let program = program_of(cmd);
+    let mut child = ChildGuard(cmd.spawn().map_err(|e| exec_error(&program, e))?);
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
         StdinMode::Filter(mut filter) => {
@@ -569,6 +571,45 @@ impl CaptureResult {
     }
 }
 
+/// A wrapped binary that isn't on PATH. Typed so `main` can exit 127 (the POSIX
+/// command-not-found status) instead of a generic 1, which any `cmd || fallback`
+/// or CI gate testing for 127 would otherwise misread as an ordinary failure.
+#[derive(Debug)]
+pub struct CommandNotFound {
+    pub program: String,
+}
+
+impl std::fmt::Display for CommandNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: command not found", self.program)
+    }
+}
+
+impl std::error::Error for CommandNotFound {}
+
+/// Turn a spawn failure into an accurate diagnostic.
+///
+/// The raw errno cannot answer "is this binary missing?". POSIX `execvp` walks
+/// PATH, and if any candidate directory is unreadable it reports **EACCES over
+/// ENOENT** even when nothing matched. On WSL the Windows interop entries (e.g.
+/// `/mnt/c/.../WindowsApps`) are routinely unreadable, so a plainly missing
+/// binary surfaces as `Permission denied (os error 13)` and reads like a
+/// sandbox or permissions problem, inviting a bypass that then fails
+/// differently. `which` walks the same PATH but skips unreadable directories,
+/// so it answers the question the errno can't. Ask it rather than the errno.
+fn exec_error(program: &str, err: std::io::Error) -> anyhow::Error {
+    if which::which(program).is_err() {
+        return anyhow::Error::new(CommandNotFound {
+            program: program.to_string(),
+        });
+    }
+    anyhow::Error::new(err).context(format!("Failed to execute {}", program))
+}
+
+fn program_of(cmd: &Command) -> String {
+    cmd.get_program().to_string_lossy().into_owned()
+}
+
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     capture(cmd)
@@ -588,8 +629,8 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
-    let program = cmd.get_program().to_string_lossy().into_owned();
-    let output = cmd.output().context("Failed to execute command")?;
+    let program = program_of(cmd);
+    let output = cmd.output().map_err(|e| exec_error(&program, e))?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureResult {
         stdout: super::utils::decode_process_output(&output.stdout),
