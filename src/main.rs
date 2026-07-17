@@ -1800,7 +1800,14 @@ fn main() {
         Ok(code) => code,
         Err(e) => {
             eprintln!("rtk: {:#}", e);
-            1
+            // POSIX reserves 127 for command-not-found. Collapsing it into a
+            // generic 1 makes `cmd || fallback` and CI gates that test for 127
+            // read a missing binary as an ordinary failure.
+            if e.downcast_ref::<core::stream::CommandNotFound>().is_some() {
+                127
+            } else {
+                1
+            }
         }
     };
     std::process::exit(code);
@@ -1844,12 +1851,22 @@ where
     }
 }
 
+/// POSIX binary comparison operators. A `test` expression can lead with a plain
+/// operand (`test 1 -eq 2`), so the leading-dash rule alone misses these and
+/// hands them to the runner filter, which joins them into `sh -c "1 -eq 2"`.
+const POSIX_TEST_BINARY_OPS: &[&str] = &[
+    "=", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-ef", "-nt", "-ot",
+];
+
 fn is_native_test_expression(command: &[String]) -> bool {
     match command.first().map(String::as_str) {
         // `!` and `(` are shell syntax too, so they only mark a native
         // expression when what they apply to is one.
         Some("!") | Some("(") => is_native_test_expression(&command[1..]),
-        Some(arg) => arg.starts_with('-'),
+        Some(arg) if arg.starts_with('-') => true,
+        Some(_) => command
+            .iter()
+            .any(|a| POSIX_TEST_BINARY_OPS.contains(&a.as_str())),
         None => false,
     }
 }
@@ -3184,6 +3201,58 @@ fn is_operational_command(cmd: &Commands) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // --- POSIX `test` builtin vs test-runner classification ---
+
+    #[test]
+    fn test_native_expression_detects_unary_file_ops() {
+        for op in ["-f", "-d", "-e", "-x", "-z", "-n", "-s", "-L"] {
+            assert!(
+                is_native_test_expression(&[op.to_string(), "/etc/hostname".to_string()]),
+                "`test {} path` is the POSIX builtin, not a runner",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_expression_detects_binary_comparisons() {
+        assert!(is_native_test_expression(&[
+            "1".to_string(),
+            "-eq".to_string(),
+            "2".to_string()
+        ]));
+        assert!(is_native_test_expression(&[
+            "a".to_string(),
+            "=".to_string(),
+            "b".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_native_expression_leaves_test_runners_alone() {
+        // These must still reach the runner filter, which is the whole point of
+        // `rtk test`.
+        assert!(!is_native_test_expression(&[
+            "cargo".to_string(),
+            "test".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[
+            "pytest".to_string(),
+            "-v".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[
+            "npm".to_string(),
+            "test".to_string()
+        ]));
+        // A runner flag that looks unary but is not in a leading position.
+        assert!(!is_native_test_expression(&[
+            "cargo".to_string(),
+            "test".to_string(),
+            "-f".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[]));
+    }
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
