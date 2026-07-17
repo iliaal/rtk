@@ -256,7 +256,7 @@ fn run_compress(
     }
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
-    let mut cmd = crate::core::utils::resolved_command("find");
+    let mut cmd = crate::core::utils::resolved_command("find")?;
     cmd.args(options).args(paths);
     if !expr.is_empty() {
         cmd.arg("(");

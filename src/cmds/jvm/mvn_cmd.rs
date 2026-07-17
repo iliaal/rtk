@@ -1796,22 +1796,23 @@ fn mvn_binary(daemon: bool) -> &'static str {
     }
 }
 
-fn new_mvn_command(args: &[String], daemon: bool) -> Command {
+fn new_mvn_command(args: &[String], daemon: bool) -> Result<Command> {
     let mut cmd = if daemon {
-        resolved_command("mvnd")
+        resolved_command("mvnd")?
     } else if cfg!(windows) {
         if Path::new(".\\mvnw.cmd").exists() {
             Command::new(".\\mvnw.cmd")
         } else {
-            resolved_command("mvn")
+            resolved_command("mvn")?
         }
     } else if Path::new("./mvnw").exists() {
         Command::new("./mvnw")
     } else {
-        resolved_command("mvn")
+        resolved_command("mvn")?
     };
     cmd.args(args);
-    cmd
+    Ok(cmd)
+
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -1850,7 +1851,7 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             return runner::run_passthrough(tool, &osargs, verbose);
         }
         return runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             |raw: &str| filter_quiet(raw, daemon),
@@ -1862,21 +1863,21 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
 
     match phase {
         MvnPhase::Test => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
         MvnPhase::Compile => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
         MvnPhase::Package => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_package(raw, daemon),
