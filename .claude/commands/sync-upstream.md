@@ -1,5 +1,5 @@
 ---
-description: Rebase fork master onto rtk-ai/rtk upstream, surface conflicts and decision points, verify, then stop before push for review
+description: Rebase the fork's install branch onto rtk-ai/rtk upstream, surface conflicts and decision points, verify, then stop before push for review
 ---
 
 # /sync-upstream
@@ -10,10 +10,15 @@ on top of upstream so the history stays a linear overlay. The command stops
 before pushing so the user reviews the force-push and any documentation
 updates.
 
+The install branch is `integ/all-patches`, which rebases onto upstream
+`master` (released). Both are configurable: `FORK_BRANCH` is the local branch
+being synced, `UPSTREAM_BRANCH` is the upstream ref it rebases onto. Set
+`UPSTREAM_BRANCH=develop` to track the integration branch instead of releases.
+
 ## When to invoke
 
 - Periodic upstream sync (weekly / when upstream cuts a release).
-- `git status` shows the local master is behind `origin/master`.
+- `git status` shows `integ/all-patches` is behind `origin/master`.
 - After an upstream release-please tag bump appears in `git log origin/master`.
 
 ## Inputs
@@ -21,8 +26,8 @@ updates.
 Optional argument: `--auto-push` to skip the manual approval gate at the end
 (force-pushes to `fork` automatically). **Default is review-first.**
 
-The command operates on the current branch's master. It refuses to run if HEAD
-is not on `master` (the fork branch we sync).
+The command operates on `FORK_BRANCH` (default `integ/all-patches`). It refuses
+to run unless HEAD is on that branch; override with `FORK_BRANCH=<branch>`.
 
 ## Implementation
 
@@ -36,9 +41,13 @@ set -euo pipefail
 # ---- Configuration --------------------------------------------------------
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-origin}"   # rtk-ai/rtk
 FORK_REMOTE="${FORK_REMOTE:-fork}"             # iliaal/rtk
-BRANCH="master"
+# The fork branch being synced and the upstream ref it rebases onto are
+# separate: the install target is integ/all-patches, which tracks upstream
+# `master` (released) rather than a same-named branch.
+FORK_BRANCH="${FORK_BRANCH:-integ/all-patches}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-master}"
 TS="$(date +%Y%m%d-%H%M%S)"
-BACKUP_BRANCH="master.bak.${TS}"
+BACKUP_BRANCH="${FORK_BRANCH//\//-}.bak.${TS}"
 
 AUTO_PUSH=false
 for arg in "$@"; do
@@ -58,7 +67,7 @@ bold "[0/7] Pre-flight"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not inside a git repo"
 
 CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-[ "$CUR_BRANCH" = "$BRANCH" ] || fail "not on $BRANCH (HEAD is $CUR_BRANCH)"
+[ "$CUR_BRANCH" = "$FORK_BRANCH" ] || fail "not on $FORK_BRANCH (HEAD is $CUR_BRANCH). Override with FORK_BRANCH=<branch>."
 
 if [ -n "$(git status --porcelain)" ]; then
   fail "working tree not clean — commit or stash before syncing"
@@ -77,14 +86,15 @@ bold "[1/7] Fetch"
 git fetch --prune "$UPSTREAM_REMOTE"
 git fetch --prune "$FORK_REMOTE"
 
-BASE="$(git merge-base "$BRANCH" "$UPSTREAM_REMOTE/$BRANCH")"
-AHEAD="$(git rev-list --count "$UPSTREAM_REMOTE/$BRANCH..$BRANCH")"
-BEHIND="$(git rev-list --count "$BRANCH..$UPSTREAM_REMOTE/$BRANCH")"
+UPSTREAM_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+BASE="$(git merge-base "$FORK_BRANCH" "$UPSTREAM_REF")"
+AHEAD="$(git rev-list --count "$UPSTREAM_REF..$FORK_BRANCH")"
+BEHIND="$(git rev-list --count "$FORK_BRANCH..$UPSTREAM_REF")"
 echo "  common ancestor: $BASE"
 echo "  fork ahead by $AHEAD, behind upstream by $BEHIND"
 
 if [ "$BEHIND" = "0" ]; then
-  echo "  ✓ already up to date with $UPSTREAM_REMOTE/$BRANCH — nothing to sync"
+  echo "  ✓ already up to date with $UPSTREAM_REF — nothing to sync"
   exit 0
 fi
 
@@ -92,16 +102,16 @@ fi
 bold "[2/7] Inventory of incoming commits"
 echo
 echo "Fork-only commits (will be replayed on top):"
-git log --oneline --no-decorate "$UPSTREAM_REMOTE/$BRANCH..$BRANCH" | sed 's/^/  /'
+git log --oneline --no-decorate "$UPSTREAM_REF..$FORK_BRANCH" | sed 's/^/  /'
 echo
 echo "Incoming upstream commits:"
-git log --oneline --no-decorate "$BRANCH..$UPSTREAM_REMOTE/$BRANCH" | sed 's/^/  /'
+git log --oneline --no-decorate "$FORK_BRANCH..$UPSTREAM_REF" | sed 's/^/  /'
 echo
 
 # ---- Phase 3: Conflict prediction -----------------------------------------
 bold "[3/7] Predicting conflicts"
-UPSTREAM_FILES="$(git diff --name-only "$BASE..$UPSTREAM_REMOTE/$BRANCH" | sort -u)"
-FORK_FILES="$(git diff --name-only "$BASE..$BRANCH" | sort -u)"
+UPSTREAM_FILES="$(git diff --name-only "$BASE..$UPSTREAM_REF" | sort -u)"
+FORK_FILES="$(git diff --name-only "$BASE..$FORK_BRANCH" | sort -u)"
 OVERLAP="$(comm -12 <(echo "$UPSTREAM_FILES") <(echo "$FORK_FILES"))"
 
 if [ -z "$OVERLAP" ]; then
@@ -113,13 +123,13 @@ fi
 echo
 
 # ---- Phase 4: Backup ------------------------------------------------------
-bold "[4/7] Backup current $BRANCH → $BACKUP_BRANCH"
-git branch "$BACKUP_BRANCH" "$BRANCH"
+bold "[4/7] Backup current $FORK_BRANCH → $BACKUP_BRANCH"
+git branch "$BACKUP_BRANCH" "$FORK_BRANCH"
 echo "  (recover with:  git reset --hard $BACKUP_BRANCH  )"
 
 # ---- Phase 5: Rebase ------------------------------------------------------
-bold "[5/7] Rebase $BRANCH onto $UPSTREAM_REMOTE/$BRANCH"
-if git rebase "$UPSTREAM_REMOTE/$BRANCH"; then
+bold "[5/7] Rebase $FORK_BRANCH onto $UPSTREAM_REF"
+if git rebase "$UPSTREAM_REF"; then
   echo "  ✓ rebase clean"
 else
   warn "  Rebase paused due to conflicts."
@@ -158,18 +168,18 @@ echo "  ✓ fmt + clippy + test all green"
 bold "[7/7] Summary"
 NEW_HEAD="$(git rev-parse --short HEAD)"
 OLD_HEAD="$(git rev-parse --short "$BACKUP_BRANCH")"
-echo "  master:  $OLD_HEAD → $NEW_HEAD"
+echo "  $FORK_BRANCH:  $OLD_HEAD → $NEW_HEAD"
 echo "  picked up $BEHIND upstream commit(s), replayed $AHEAD fork commit(s)"
 echo "  backup branch: $BACKUP_BRANCH (delete with: git branch -D $BACKUP_BRANCH)"
 echo
 echo "Doc-impact scan (review these manually):"
-echo "  - New top-level subcommands in $UPSTREAM_REMOTE/$BRANCH:"
-git log "$BASE..$UPSTREAM_REMOTE/$BRANCH" --format='%s' \
+echo "  - New top-level subcommands in $UPSTREAM_REF:"
+git log "$BASE..$UPSTREAM_REF" --format='%s' \
   | grep -iE '^(feat|feature)(\([^)]+\))?:' \
   | sed 's/^/      /' || true
 echo
 echo "  - Breaking/security/CI commits worth noting:"
-git log "$BASE..$UPSTREAM_REMOTE/$BRANCH" --format='%h %s' \
+git log "$BASE..$UPSTREAM_REF" --format='%h %s' \
   | grep -iE '(breaking|security|cicd|deny warnings|migration|deprecat)' \
   | sed 's/^/      /' || true
 echo
@@ -184,11 +194,11 @@ echo
 
 if [ "$AUTO_PUSH" = "true" ]; then
   bold "Pushing to $FORK_REMOTE (--auto-push)"
-  git push --force-with-lease "$FORK_REMOTE" "$BRANCH"
+  git push --force-with-lease "$FORK_REMOTE" "$FORK_BRANCH"
   echo "  ✓ pushed"
 else
   bold "Push gate — review the above, then run:"
-  echo "    git push --force-with-lease $FORK_REMOTE $BRANCH"
+  echo "    git push --force-with-lease $FORK_REMOTE $FORK_BRANCH"
   echo
   echo "  (force-with-lease refuses the push if someone else updated the fork remote)"
 fi
@@ -250,8 +260,8 @@ The bash script does the mechanical work. The assistant should also:
    Propose specific edits; do not apply them until the user approves.
 
 4. **Branch hygiene.** Once the user confirms the force-push succeeded and is
-   happy with the result, delete `master.bak.<ts>` with the user's go-ahead.
-   Do not delete the backup branch automatically.
+   happy with the result, delete the `<fork-branch>.bak.<ts>` backup with the
+   user's go-ahead. Do not delete the backup branch automatically.
 
 ## Safety properties
 
@@ -268,9 +278,9 @@ The bash script does the mechanical work. The assistant should also:
 ## Non-goals
 
 - This command does not cherry-pick PR branches (`origin/feat/*`,
-  `origin/fix/*`) — only `origin/master`. PR branches are integrated upstream
-  by their authors; pulling pre-merge PRs into the fork creates a divergent
-  history.
+  `origin/fix/*`) — only the upstream ref (`origin/master` by default). PR
+  branches are integrated upstream by their authors; pulling pre-merge PRs into
+  the fork creates a divergent history.
 - This command does not run `cargo install --path .` to refresh the local
   binary. After a successful sync, the user should run `cargo install --path
   .` (or `cargo build --release && cp target/release/rtk ~/.local/bin/`)
@@ -282,8 +292,9 @@ The bash script does the mechanical work. The assistant should also:
 ## Recovery cheatsheet
 
 - **Rebase went sideways**: `git rebase --abort` then
-  `git reset --hard master.bak.<ts>`.
+  `git reset --hard <fork-branch>.bak.<ts>` (the backup name replaces `/` with
+  `-`, e.g. `integ-all-patches.bak.<ts>`).
 - **Pushed bad rebase to fork**: re-checkout the backup,
-  `git push --force-with-lease fork master.bak.<ts>:master`.
-- **Lost the backup branch**: `git reflog` shows the previous master HEAD;
+  `git push --force-with-lease fork <backup>:integ/all-patches`.
+- **Lost the backup branch**: `git reflog` shows the previous branch HEAD;
   recover with `git reset --hard <reflog-sha>`.
