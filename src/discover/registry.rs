@@ -13,6 +13,35 @@ use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
+const WRAP_SUPPORTED_TOOLS: &[&str] = &[
+    "phpunit", "phpstan", "pest", "paratest", "ecs", "pint", "phpt",
+];
+
+/// Flags that consume the next token as their value, for `docker exec` /
+/// `kubectl exec` / `podman exec` style wrappers. Extend as needed.
+const WRAPPER_FLAGS_WITH_VALUE: &[&str] = &[
+    "-c",
+    "--container",
+    "-e",
+    "--env",
+    "--env-file",
+    "-u",
+    "--user",
+    "-w",
+    "--workdir",
+    "--detach-keys",
+    "-f",
+    "--file",
+    "--project-directory",
+    "--project-name",
+    "-p",
+    "--namespace",
+    "-n",
+    "--context",
+    "--kubeconfig",
+    "--cluster",
+];
+
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
 pub enum Classification {
@@ -273,6 +302,218 @@ fn normalize_php_tool_command(cmd: &str) -> String {
 /// a `php` prefix is always the interpreter (never `php artisan`/`run-tests.php`).
 fn strip_php_wrapper(cmd: &str) -> &str {
     cmd.strip_prefix("php ").map_or(cmd, str::trim_start)
+}
+
+/// Strip PHP CLI flags that don't affect tool detection (`-d KEY=VAL`,
+/// `-dKEY=VAL`, `-n`, `-c PATH`) AND peel off the leading `php` wrapper so
+/// subsequent normalization sees `vendor/bin/phpunit` as the first token.
+///
+/// `php -d memory_limit=512M vendor/bin/phpstan analyse`
+///     → `vendor/bin/phpstan analyse`
+///
+/// Exception: `php -l <file>` and `php run-tests.php <...>` stay intact,
+/// because those are matched by explicit rules that want the `php` prefix.
+fn strip_php_ini_flags(cmd: &str) -> String {
+    if !cmd.starts_with("php ") {
+        return cmd.to_string();
+    }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    if tokens.is_empty() {
+        return cmd.to_string();
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if t == "-d" || t == "-c" {
+            i += 2;
+        } else if t == "-n"
+            || t.starts_with("-d")
+            || t.starts_with("--define=")
+            || t.starts_with("-c=")
+        {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    if i >= tokens.len() {
+        return cmd.to_string();
+    }
+
+    // Keep the `php` prefix when the next token is a php-specific flag or
+    // script the rule explicitly anchors on (-l syntax check, run-tests.php,
+    // artisan). Otherwise peel off `php` so tool detection runs on the tail.
+    let next = tokens[i];
+    let keeps_php_prefix = next == "-l"
+        || next == "--syntax-check"
+        || next == "artisan"
+        || next == "run-tests.php"
+        || next == "./run-tests.php";
+
+    let out: Vec<&str> = if keeps_php_prefix {
+        std::iter::once(tokens[0])
+            .chain(tokens[i..].iter().copied())
+            .collect()
+    } else {
+        tokens[i..].to_vec()
+    };
+
+    out.join(" ")
+}
+
+/// Detect a command-wrapper prefix (`docker exec`, `docker compose exec`,
+/// `kubectl exec`, `podman exec`, `nerdctl exec`) and split the command into
+/// `(wrapper_prefix_joined, inner_command)`. Returns `None` for anything we
+/// don't recognize as a wrapper.
+///
+/// Handles common flag shapes: bool flags (`-it`), flags with equals
+/// (`--foo=bar`), and flags that consume the next token (`-c name`).
+fn strip_command_wrapper(cmd: &str) -> Option<(String, String)> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return None;
+    }
+
+    // Find the `exec` token and how many tokens belong to the wrapper preamble.
+    let (exec_idx, flags_start) = match tokens[0] {
+        "docker" => {
+            if tokens[1] == "exec" {
+                (1, 2)
+            } else if tokens[1] == "compose" || tokens[1] == "-c" || tokens[1] == "--context" {
+                // docker compose [flags] exec [flags] <service> <inner...>
+                // Scan for the first `exec` after optional flags.
+                let pos = tokens.iter().position(|&t| t == "exec")?;
+                if pos < 2 {
+                    return None;
+                }
+                (pos, pos + 1)
+            } else {
+                return None;
+            }
+        }
+        "docker-compose" => {
+            let pos = tokens.iter().position(|&t| t == "exec")?;
+            (pos, pos + 1)
+        }
+        "kubectl" | "podman" | "nerdctl" => {
+            if tokens[1] != "exec" {
+                return None;
+            }
+            (1, 2)
+        }
+        _ => return None,
+    };
+
+    let _ = exec_idx;
+
+    // After `exec`, skip flags. `WRAPPER_FLAGS_WITH_VALUE` entries consume the
+    // next token; everything else starting with `-` is treated as a bool flag.
+    let mut i = flags_start;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if t == "--" {
+            // `kubectl exec pod -- cmd` uses `--` as the command separator,
+            // but some callers put it before the container name. Handle both.
+            i += 1;
+            break;
+        }
+        if !t.starts_with('-') {
+            break;
+        }
+        if t.contains('=') {
+            i += 1;
+            continue;
+        }
+        if WRAPPER_FLAGS_WITH_VALUE.contains(&t) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    // `i` now points at the container/pod name (for docker/podman/nerdctl) or
+    // at the command (for kubectl if `--` was consumed).
+    if i >= tokens.len() {
+        return None;
+    }
+
+    // For docker/podman/nerdctl, the token at `i` is the container name; the
+    // inner command starts at `i + 1`. kubectl may have `pod -c container --
+    // cmd`, where we need to consume the pod-level flags too.
+    let inner_start = match tokens[0] {
+        "kubectl" => {
+            // If we already consumed `--`, `i` is the command start.
+            // Otherwise, skip the pod name and look for more flags + `--`.
+            let mut j = i + 1;
+            while j < tokens.len() {
+                let t = tokens[j];
+                if t == "--" {
+                    j += 1;
+                    break;
+                }
+                if !t.starts_with('-') {
+                    break;
+                }
+                if t.contains('=') {
+                    j += 1;
+                } else if WRAPPER_FLAGS_WITH_VALUE.contains(&t) {
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            j
+        }
+        _ => i + 1,
+    };
+
+    if inner_start >= tokens.len() {
+        return None;
+    }
+
+    let prefix = tokens[..inner_start].join(" ");
+    let inner = tokens[inner_start..].join(" ");
+    Some((prefix, inner))
+}
+
+/// Pick the wrap-supported tool name for an inner command, or `None` if the
+/// inner command doesn't classify as something `rtk wrap` can filter.
+///
+/// Applies `strip_php_ini_flags` first so `php -d memory_limit=512M
+/// vendor/bin/phpunit` classifies as phpunit even though the top-level
+/// classifier can't rewrite that form (rewrite_prefixes don't cover the
+/// `-d` form). The stripped command is used only for classification;
+/// the wrap rewrite preserves the original command verbatim.
+fn wrappable_tool_for(inner: &str) -> Option<&'static str> {
+    let normalized = strip_php_ini_flags(inner);
+
+    // `php -l <file>` routes to the generic `rtk php` rule rather than a
+    // dedicated rtk_cmd, so special-case it before falling through to the
+    // classifier. Runs the lint-specific filter in wrap mode.
+    if is_php_lint_invocation(&normalized) {
+        return Some("php-lint");
+    }
+
+    let classified = classify_command(&normalized);
+    let rtk_equiv = match classified {
+        Classification::Supported { rtk_equivalent, .. } => rtk_equivalent,
+        _ => return None,
+    };
+    let tool = rtk_equiv.strip_prefix("rtk ")?;
+    WRAP_SUPPORTED_TOOLS
+        .iter()
+        .copied()
+        .find(|&candidate| candidate == tool)
+}
+
+fn is_php_lint_invocation(cmd: &str) -> bool {
+    let mut tokens = cmd.split_whitespace();
+    if tokens.next() != Some("php") {
+        return false;
+    }
+    tokens.any(|t| t == "-l" || t == "--syntax-check")
 }
 
 fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
@@ -1365,6 +1606,26 @@ fn rewrite_segment_inner(
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
         return Some(trimmed.to_string());
+    }
+
+    // Command wrappers (docker exec, docker compose exec, kubectl exec, ...):
+    // if the tail is a wrap-supported PHP tool, emit `rtk wrap <tool> -- <original>`
+    // so the tool runs inside its container and rtk filters stdout on the host.
+    // Gated to Normal: wrap bypasses the rule lookup below, so without this it
+    // would rewrite in pipeline-final position, where every rule but grep/rg is
+    // `pipeline_final_safe: false`.
+    if context == RewriteContext::Normal {
+        if let Some((_prefix, inner)) = strip_command_wrapper(cmd_part) {
+            if let Some(tool) = wrappable_tool_for(&inner) {
+                if is_excluded(cmd_part, excluded) {
+                    return None;
+                }
+                return Some(format!(
+                    "rtk wrap {} -- {}{}",
+                    tool, cmd_part, redirect_suffix
+                ));
+            }
+        }
     }
 
     if context == RewriteContext::Normal
@@ -6066,5 +6327,213 @@ mod tests {
             normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
             "pest"
         );
+    }
+    // --- Command wrapper detection (docker exec, kubectl exec, ...) ---
+
+    #[test]
+    fn test_strip_command_wrapper_docker_exec_plain() {
+        let (prefix, inner) =
+            strip_command_wrapper("docker exec app vendor/bin/phpunit tests/").unwrap();
+        assert_eq!(prefix, "docker exec app");
+        assert_eq!(inner, "vendor/bin/phpunit tests/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_docker_exec_with_bool_flags() {
+        let (prefix, inner) =
+            strip_command_wrapper("docker exec -it app vendor/bin/phpunit tests/").unwrap();
+        assert_eq!(prefix, "docker exec -it app");
+        assert_eq!(inner, "vendor/bin/phpunit tests/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_docker_exec_with_value_flag() {
+        let (prefix, inner) =
+            strip_command_wrapper("docker exec --user www-data app php vendor/bin/phpunit tests/")
+                .unwrap();
+        assert_eq!(prefix, "docker exec --user www-data app");
+        assert_eq!(inner, "php vendor/bin/phpunit tests/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_docker_exec_equals_flag() {
+        let (prefix, inner) =
+            strip_command_wrapper("docker exec --user=www-data app vendor/bin/phpstan analyse")
+                .unwrap();
+        assert_eq!(prefix, "docker exec --user=www-data app");
+        assert_eq!(inner, "vendor/bin/phpstan analyse");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_docker_compose_exec() {
+        let (prefix, inner) = strip_command_wrapper(
+            "docker compose exec app php -d memory_limit=512M vendor/bin/phpunit",
+        )
+        .unwrap();
+        assert_eq!(prefix, "docker compose exec app");
+        assert_eq!(inner, "php -d memory_limit=512M vendor/bin/phpunit");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_docker_compose_dash() {
+        let (prefix, inner) =
+            strip_command_wrapper("docker-compose exec app vendor/bin/pest").unwrap();
+        assert_eq!(prefix, "docker-compose exec app");
+        assert_eq!(inner, "vendor/bin/pest");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_kubectl_with_separator() {
+        let (prefix, inner) =
+            strip_command_wrapper("kubectl exec pod-xyz -- vendor/bin/phpunit tests/").unwrap();
+        assert_eq!(prefix, "kubectl exec pod-xyz --");
+        assert_eq!(inner, "vendor/bin/phpunit tests/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_kubectl_with_container() {
+        let (prefix, inner) =
+            strip_command_wrapper("kubectl exec pod-xyz -c app -- vendor/bin/phpstan analyse src/")
+                .unwrap();
+        assert_eq!(prefix, "kubectl exec pod-xyz -c app --");
+        assert_eq!(inner, "vendor/bin/phpstan analyse src/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_podman() {
+        let (prefix, inner) =
+            strip_command_wrapper("podman exec app vendor/bin/phpunit tests/").unwrap();
+        assert_eq!(prefix, "podman exec app");
+        assert_eq!(inner, "vendor/bin/phpunit tests/");
+    }
+
+    #[test]
+    fn test_strip_command_wrapper_no_match_for_non_wrappers() {
+        assert!(strip_command_wrapper("phpunit tests/").is_none());
+        assert!(strip_command_wrapper("git status").is_none());
+        assert!(strip_command_wrapper("docker build .").is_none());
+        assert!(strip_command_wrapper("docker run app phpunit").is_none());
+    }
+
+    // --- Wrap rewriting ---
+
+    #[test]
+    fn test_rewrite_wrapped_phpunit_docker_exec() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app vendor/bin/phpunit tests/", &[]),
+            Some("rtk wrap phpunit -- docker exec app vendor/bin/phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_phpunit_with_php_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "docker exec app php -d memory_limit=512M vendor/bin/phpunit --filter FooTest",
+                &[]
+            ),
+            Some(
+                "rtk wrap phpunit -- docker exec app php -d memory_limit=512M vendor/bin/phpunit --filter FooTest"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_phpstan_compose_exec() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "docker compose exec app php -d memory_limit=512M vendor/bin/phpstan analyse",
+                &[]
+            ),
+            Some(
+                "rtk wrap phpstan -- docker compose exec app php -d memory_limit=512M vendor/bin/phpstan analyse"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_pint_with_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app ./vendor/bin/pint --parallel", &[]),
+            Some("rtk wrap pint -- docker exec app ./vendor/bin/pint --parallel".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_kubectl_phpt() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "kubectl exec dev-pod -- php run-tests.php Zend/tests/",
+                &[]
+            ),
+            Some("rtk wrap phpt -- kubectl exec dev-pod -- php run-tests.php Zend/tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_non_php_tool_falls_through_to_rtk_docker() {
+        // Wrap interception only fires for wrap-supported PHP tools. Non-PHP
+        // inner commands drop through to the pre-existing `rtk docker` rule
+        // that already wraps any `docker exec` invocation.
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app git status", &[]),
+            Some("rtk docker exec app git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_unsupported_php_tool_falls_through_to_rtk_docker() {
+        // `php artisan` is not in WRAP_SUPPORTED_TOOLS (v1), so we fall
+        // through to `rtk docker` rather than producing `rtk wrap`.
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app php artisan migrate", &[]),
+            Some("rtk docker exec app php artisan migrate".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app php -l src/Foo.php", &[]),
+            Some("rtk wrap php-lint -- docker exec app php -l src/Foo.php".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint_with_ini_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "docker exec app php -ddisable_functions= -l src/Foo.php",
+                &[]
+            ),
+            Some(
+                "rtk wrap php-lint -- docker exec app php -ddisable_functions= -l src/Foo.php"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wrapped_php_lint_long_form() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker exec app php --syntax-check src/Foo.php", &[]),
+            Some("rtk wrap php-lint -- docker exec app php --syntax-check src/Foo.php".into())
+        );
+    }
+
+    #[test]
+    fn test_is_php_lint_invocation_negative_cases() {
+        assert!(!is_php_lint_invocation("php artisan migrate"));
+        assert!(!is_php_lint_invocation("php vendor/bin/phpunit tests/"));
+        assert!(!is_php_lint_invocation("pint --parallel"));
+        assert!(!is_php_lint_invocation("php"));
+    }
+
+    #[test]
+    fn test_is_php_lint_invocation_positive_cases() {
+        assert!(is_php_lint_invocation("php -l src/Foo.php"));
+        assert!(is_php_lint_invocation("php --syntax-check src/Foo.php"));
     }
 }
