@@ -25,7 +25,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, search, summary, tree, wc_cmd,
+    read, search, summary, tree, wc_cmd, wrap_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -679,6 +679,17 @@ enum Commands {
         /// Pass stdin through without filtering
         #[arg(long)]
         passthrough: bool,
+    },
+
+    /// Run a command inside any wrapper (docker exec, kubectl exec, ssh) and filter
+    /// its output as if it were the named tool. Example:
+    ///   rtk wrap phpunit -- docker exec app vendor/bin/phpunit tests/
+    Wrap {
+        /// Tool whose filter to apply (phpunit, phpstan, pest, paratest, ecs, pint, phpt, php-lint)
+        tool: String,
+        /// Command to run (everything after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
     },
 
     /// Trust project-local TOML filters in current directory
@@ -2634,6 +2645,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Wrap { tool, cmd } => wrap_cmd::run(&tool, &cmd, cli.verbose)?,
+
         Commands::Run { command, args } => {
             let raw = match command {
                 Some(c) => c,
@@ -2923,6 +2936,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ecs { .. }
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
+            | Commands::Wrap { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
