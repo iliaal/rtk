@@ -1,3 +1,4 @@
+use crate::core::utils::CommandNotFound;
 use anyhow::{Context, Result};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
@@ -532,22 +533,6 @@ impl CaptureResult {
         format!("{}{}", self.stdout, self.stderr)
     }
 }
-
-/// A wrapped binary that isn't on PATH. Typed so `main` can exit 127 (the POSIX
-/// command-not-found status) instead of a generic 1, which any `cmd || fallback`
-/// or CI gate testing for 127 would otherwise misread as an ordinary failure.
-#[derive(Debug)]
-pub struct CommandNotFound {
-    pub program: String,
-}
-
-impl std::fmt::Display for CommandNotFound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: command not found", self.program)
-    }
-}
-
-impl std::error::Error for CommandNotFound {}
 
 /// Turn a spawn failure into an accurate diagnostic.
 ///
