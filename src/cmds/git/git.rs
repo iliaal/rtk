@@ -479,7 +479,8 @@ fn run_log(
         .iter()
         .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
     // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    let dropped_merges = !wants_merges && !has_limit_flag;
+    if dropped_merges {
         cmd.arg("--no-merges");
     }
 
@@ -502,6 +503,15 @@ fn run_log(
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
+
+    // The in-band omission marker is a line on stdout, so `wc -l` counts it as
+    // history and `grep -c` never sees it at all — in a pipeline the cap goes
+    // silent again exactly where history is being used as evidence. Repeat the
+    // notice on stderr, which the downstream pipe does not consume. Gating the
+    // cap on `is_terminal()` instead would disable it for every agent call,
+    // since a captured Bash tool never has a terminal on stdout.
+    report_log_elision(&result.stdout, &filtered, dropped_merges);
+
     println!("{}", filtered);
 
     timer.track(
@@ -512,6 +522,46 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+/// Warn on stderr when the rendered log is not the whole answer.
+///
+/// Two things can make it partial: rtk capping the rendered output (announced
+/// in-band too) and rtk injecting `--no-merges`, which changes which commits
+/// git produced and therefore cannot be marked in-band at all.
+fn report_log_elision(raw: &str, filtered: &str, dropped_merges: bool) {
+    if let Some(notice) = log_elision_notice(raw, filtered, dropped_merges) {
+        eprintln!("{}", notice);
+    }
+}
+
+/// `None` when the rendered log is the whole answer, so a complete run stays quiet.
+pub(crate) fn log_elision_notice(
+    raw: &str,
+    filtered: &str,
+    dropped_merges: bool,
+) -> Option<String> {
+    let elided = filtered.contains("lines omitted") || filtered.contains("commits omitted");
+    if !elided && !dropped_merges {
+        return None;
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if elided {
+        notes.push(format!(
+            "output capped ({} of {} raw lines shown)",
+            filtered.lines().count(),
+            raw.lines().count()
+        ));
+    }
+    if dropped_merges {
+        notes.push("merge commits excluded (--no-merges injected)".to_string());
+    }
+    Some(format!(
+        "[rtk] git log: {} — piping this? counts and greps see the filtered view; \
+         use `rtk proxy git log` or pass -n N for the raw stream.",
+        notes.join("; ")
+    ))
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2636,6 +2686,35 @@ A  added.rs
         // Test that run_passthrough compiles and has correct signature
         let _args: Vec<OsString> = vec![OsString::from("tag"), OsString::from("--list")];
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn test_log_elision_notice_silent_when_complete() {
+        // A run that showed everything and kept every merge must not warn, or
+        // the notice becomes noise and stops being read.
+        assert_eq!(log_elision_notice("a\nb\n", "a\nb", false), None);
+    }
+
+    #[test]
+    fn test_log_elision_notice_reports_cap() {
+        let raw = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let filtered = "line 0\n[+99 lines omitted; pass -n 100 for all]";
+        let notice = log_elision_notice(&raw, filtered, false).expect("cap must be reported");
+        assert!(notice.contains("output capped"), "got: {notice}");
+        assert!(notice.contains("of 100 raw lines"), "got: {notice}");
+        assert!(!notice.contains("merge commits"), "got: {notice}");
+    }
+
+    #[test]
+    fn test_log_elision_notice_reports_injected_no_merges() {
+        // --no-merges changes which commits git produced, so there is no in-band
+        // marker for it at all; stderr is the only channel that can say so.
+        let notice = log_elision_notice("a\nb\n", "a\nb", true).expect("merge drop must be reported");
+        assert!(notice.contains("merge commits excluded"), "got: {notice}");
+        assert!(!notice.contains("output capped"), "got: {notice}");
     }
 
     #[test]
