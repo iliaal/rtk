@@ -140,18 +140,27 @@ pub(crate) fn filter_phpstan_json(output: &str) -> String {
         return "PHPStan: No output".to_string();
     }
 
-    let parsed: Result<PhpstanOutput, _> = serde_json::from_str(output);
-    let phpstan = match parsed {
+    try_filter_phpstan_json(output)
+        .unwrap_or_else(|| crate::core::utils::fallback_tail(output, "phpstan (JSON parse error)", 5))
+}
+
+/// `None` when `output` is not parseable PHPStan JSON, so a caller holding a
+/// text fallback can tell a parse failure from a filtered result. The failure
+/// notice `filter_phpstan_json` emits goes to stderr and `fallback_tail`
+/// returns only the tail lines, so the returned string carries no marker to
+/// match on.
+pub(crate) fn try_filter_phpstan_json(output: &str) -> Option<String> {
+    let phpstan: PhpstanOutput = match serde_json::from_str(output) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[rtk] phpstan: JSON parse failed ({})", e);
-            return crate::core::utils::fallback_tail(output, "phpstan (JSON parse error)", 5);
+            return None;
         }
     };
 
     // No errors case: both file-specific and global error counts must be zero.
     if phpstan.totals.file_errors == 0 && phpstan.totals.errors == 0 {
-        return "phpstan: ok".to_string();
+        return Some("phpstan: ok".to_string());
     }
 
     let mut result = format!(
@@ -200,7 +209,7 @@ pub(crate) fn filter_phpstan_json(output: &str) -> String {
         ));
     }
 
-    result.trim().to_string()
+    Some(result.trim().to_string())
 }
 
 // ── Text fallback ────────────────────────────────────────────────────────────
