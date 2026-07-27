@@ -57,12 +57,50 @@ pub fn run(tool: &str, cmd_args: &[String], verbose: u8) -> Result<i32> {
 fn filter_phpstan_auto(output: &str) -> String {
     let trimmed = output.trim_start();
     if trimmed.starts_with('{') {
-        let candidate = phpstan_cmd::filter_phpstan_json(output);
-        // filter_phpstan_json returns the fallback_tail message on parse error;
-        // fall through to the text path if JSON parsing didn't stick.
-        if !candidate.starts_with("phpstan (JSON parse error)") {
-            return candidate;
+        if let Some(filtered) = phpstan_cmd::try_filter_phpstan_json(output) {
+            return filtered;
         }
     }
     phpstan_cmd::filter_phpstan_text(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phpstan_auto_routes_json_to_json_filter() {
+        // `phpstan: ok` is reachable only via the JSON path; the text path needs
+        // an "[OK]"/"no errors" line, which this input does not have.
+        let json = r#"{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}"#;
+        assert_eq!(filter_phpstan_auto(json), "phpstan: ok");
+    }
+
+    #[test]
+    fn test_phpstan_auto_routes_text_to_text_filter() {
+        let text = " [ERROR] Found 3 errors\n";
+        assert_eq!(filter_phpstan_auto(text), "PHPStan: [ERROR] Found 3 errors");
+    }
+
+    #[test]
+    fn test_phpstan_auto_falls_back_to_text_on_malformed_json() {
+        // Starts with `{` so the JSON path is tried first, but parsing fails —
+        // the text path must still get a chance rather than surfacing the
+        // JSON parse error.
+        let broken = "{not really json\n [OK] No errors\n";
+        assert_eq!(filter_phpstan_auto(broken), "phpstan: ok");
+    }
+
+    #[test]
+    fn test_wrap_rejects_unknown_tool() {
+        let err = run("definitely-not-a-tool", &["echo".to_string()], 0)
+            .expect_err("unknown tool must not run the command");
+        assert!(err.to_string().contains("unknown tool"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_wrap_requires_a_command() {
+        let err = run("phpunit", &[], 0).expect_err("empty command must be rejected");
+        assert!(err.to_string().contains("missing command"), "got: {}", err);
+    }
 }
