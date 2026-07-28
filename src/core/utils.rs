@@ -421,6 +421,7 @@ impl std::error::Error for CommandNotFound {}
 /// still being executable, so there the exec attempt is still worth making.
 pub fn resolved_command(name: &str) -> Result<Command> {
     match resolve_binary(name) {
+        // nosemgrep: dynamic-command-execution -- `path` is which's resolution of a caller-supplied tool name; this is the sanctioned constructor the rule exists to funnel callers into
         Ok(path) => Ok(Command::new(path)),
         Err(e) => {
             if cfg!(target_os = "windows") {
@@ -428,6 +429,7 @@ pub fn resolved_command(name: &str) -> Result<Command> {
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
                     name, e
                 );
+                // nosemgrep: dynamic-command-execution -- Windows-only fallback for .CMD/.BAT wrappers that evade which
                 return Ok(Command::new(name));
             }
             Err(anyhow::Error::new(CommandNotFound {
