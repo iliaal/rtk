@@ -91,6 +91,9 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 /// ```
 pub struct Tracker {
     conn: Connection,
+    /// Retention window in days, resolved once at construction. `cleanup_old` runs on
+    /// every record, so this must not re-read the config file per call.
+    history_days: i64,
 }
 
 /// Individual command record from tracking history.
@@ -470,6 +473,7 @@ impl Tracker {
     pub fn new() -> Result<Self> {
         Ok(Self {
             conn: open_and_prepare(MigrationMode::GatedByVersion)?,
+            history_days: configured_history_days(),
         })
     }
 
@@ -482,7 +486,10 @@ impl Tracker {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
         run_schema_migrations(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            history_days: configured_history_days(),
+        })
     }
 
     /// Record a command execution with token counts and timing.
@@ -546,7 +553,7 @@ impl Tracker {
     }
 
     fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
         self.conn.execute(
             "DELETE FROM commands WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -666,7 +673,7 @@ impl Tracker {
     /// `maybe_cleanup_hook_decisions` so it's directly callable (bypassing the
     /// sampling gate) from tests without needing to hit the 1-in-N chance for real.
     fn cleanup_hook_decisions(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
         self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -711,9 +718,9 @@ impl Tracker {
 
     /// Earliest timestamp among *currently-retained* hook decision rows, if any
     /// exist. NOT the date logging first began: `hook_decisions` is pruned by the
-    /// same `DEFAULT_HISTORY_DAYS` window as the rest of the tracking DB (see
+    /// same `tracking.history_days` window as the rest of the tracking DB (see
     /// `cleanup_hook_decisions`), so this rolls forward over time — on a
-    /// long-running install it settles at roughly "now minus `DEFAULT_HISTORY_DAYS`",
+    /// long-running install it settles at roughly "now minus `tracking.history_days`",
     /// not the true install date.
     ///
     /// Used to tell `rtk discover` where the "measured" window currently starts —
@@ -1489,6 +1496,29 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Retention window for `cleanup_old`, from `tracking.history_days`.
+///
+/// Falls back to the default on any config problem, including a `[tracking]` section
+/// that omits `history_days` (the field has no serde default, so a partial section
+/// fails the whole parse). A non-positive value also falls back rather than being
+/// honored: a typo'd `0` would otherwise delete the entire history on the next write.
+fn configured_history_days() -> i64 {
+    resolve_history_days(
+        crate::core::config::Config::load()
+            .ok()
+            .map(|c| c.tracking.history_days),
+    )
+}
+
+/// Clamping half of [`configured_history_days`], split out so it is testable without
+/// touching the real config file.
+fn resolve_history_days(configured: Option<u32>) -> i64 {
+    configured
+        .map(i64::from)
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_HISTORY_DAYS)
+}
+
 pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
@@ -2146,6 +2176,115 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+    }
+
+    /// Backdated tracker: one `commands` and one `parse_failures` row 10 days old,
+    /// with an explicit retention window.
+    #[cfg(test)]
+    fn tracker_with_10_day_old_rows(history_days: i64) -> Tracker {
+        let mut t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.history_days = history_days;
+        let old = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        t.conn
+            .execute(
+                "INSERT INTO commands
+                 (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                  saved_tokens, savings_pct, exec_time_ms, project_path)
+                 VALUES (?1, 'old cmd', 'rtk old cmd', 100, 20, 80, 80.0, 0, '')",
+                params![old],
+            )
+            .expect("insert backdated command");
+        t.conn
+            .execute(
+                "INSERT INTO parse_failures
+                 (timestamp, raw_command, error_message, fallback_succeeded)
+                 VALUES (?1, 'old raw', 'old err', 1)",
+                params![old],
+            )
+            .expect("insert backdated parse failure");
+        t
+    }
+
+    // Regression: cleanup_old hardcoded DEFAULT_HISTORY_DAYS, so tracking.history_days
+    // was declared, defaulted, written into config.toml, documented — and never read.
+    // Both directions are asserted deliberately: a hardcoded 90 still passes the
+    // "retained" half, so only the "pruned" half catches the regression, and only the
+    // pair proves the field is what drives the cutoff.
+    #[test]
+    fn test_cleanup_old_prunes_beyond_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(3);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 0,
+            "10-day-old command should be pruned at 3-day retention"
+        );
+
+        let stale_pf: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM parse_failures WHERE raw_command = 'old raw'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count parse_failures");
+        assert_eq!(
+            stale_pf, 0,
+            "10-day-old parse failure should be pruned at 3-day retention"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_old_retains_within_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(30);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 1,
+            "10-day-old command should survive 30-day retention"
+        );
+    }
+
+    #[test]
+    fn test_resolve_history_days() {
+        assert_eq!(
+            resolve_history_days(Some(30)),
+            30,
+            "honors a configured value"
+        );
+        // A missing/unparseable config (including a [tracking] section that omits
+        // history_days, which fails the whole parse) must not change retention.
+        assert_eq!(
+            resolve_history_days(None),
+            DEFAULT_HISTORY_DAYS,
+            "absent config falls back to the default"
+        );
+        // A typo'd 0 would otherwise delete the entire history on the next write.
+        assert_eq!(
+            resolve_history_days(Some(0)),
+            DEFAULT_HISTORY_DAYS,
+            "zero falls back rather than wiping history"
+        );
     }
 
     #[test]
