@@ -462,15 +462,48 @@ impl Tracker {
 
     fn cleanup_old(&self) -> Result<()> {
         let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
-        self.conn.execute(
-            "DELETE FROM commands WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
-        )?;
-        self.conn.execute(
+        let cutoff = cutoff.to_rfc3339();
+        let mut deleted = self
+            .conn
+            .execute("DELETE FROM commands WHERE timestamp < ?1", params![cutoff])?;
+        deleted += self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
+        if deleted > 0 {
+            self.reclaim_if_fragmented();
+        }
         Ok(())
+    }
+
+    /// Return freed pages to the filesystem when enough of the file is empty.
+    ///
+    /// These databases have no `auto_vacuum`, so a delete only marks pages reusable:
+    /// the file never shrinks on its own. Shortening `history_days` therefore prunes
+    /// millions of rows and leaves the file at its old size until something vacuums.
+    ///
+    /// `VACUUM` rewrites the whole database and takes an exclusive lock, so it must not
+    /// run on every `cleanup_old` (that is once per tracked command). Gating on the free
+    /// ratio keeps it near-free in steady state, where inserts reuse freed pages and the
+    /// freelist stays flat, and lets it fire on the bulk deletes that actually strand
+    /// space. Failure is ignored: reclaiming disk must never fail a user's command.
+    fn reclaim_if_fragmented(&self) {
+        let free: i64 = match self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let total: i64 = match self.conn.query_row("PRAGMA page_count", [], |r| r.get(0)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if should_reclaim(free, total) {
+            // Cannot run inside a transaction, and needs scratch space roughly the size
+            // of the live data. Both are why this stays best-effort.
+            let _ = self.conn.execute_batch("VACUUM;");
+        }
     }
 
     /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
@@ -1277,6 +1310,21 @@ fn configured_history_days() -> i64 {
     )
 }
 
+/// Free pages below this never justify a rewrite, whatever the ratio. At SQLite's 4 KiB
+/// default this is ~16 MB, so small databases are left alone.
+const VACUUM_MIN_FREE_PAGES: i64 = 4096;
+/// Percentage of the file that must be free pages before a rewrite pays for itself.
+const VACUUM_MIN_FREE_PCT: i64 = 25;
+
+/// Decision half of [`Tracker::reclaim_if_fragmented`], split out so the thresholds are
+/// testable without building a database large enough to cross them.
+fn should_reclaim(free_pages: i64, total_pages: i64) -> bool {
+    if total_pages <= 0 || free_pages < VACUUM_MIN_FREE_PAGES {
+        return false;
+    }
+    free_pages.saturating_mul(100) / total_pages >= VACUUM_MIN_FREE_PCT
+}
+
 /// Clamping half of [`configured_history_days`], split out so it is testable without
 /// touching the real config file.
 fn resolve_history_days(configured: Option<u32>) -> i64 {
@@ -1801,6 +1849,83 @@ mod tests {
             stale, 1,
             "10-day-old command should survive 30-day retention"
         );
+    }
+
+    #[test]
+    fn test_should_reclaim_thresholds() {
+        // Steady state: inserts reuse freed pages, so the freelist stays flat and a
+        // per-command VACUUM would be pure waste.
+        assert!(!should_reclaim(0, 100_000), "no free pages");
+        assert!(
+            !should_reclaim(VACUUM_MIN_FREE_PAGES - 1, VACUUM_MIN_FREE_PAGES),
+            "tiny database, high ratio: not worth a rewrite"
+        );
+        assert!(
+            !should_reclaim(VACUUM_MIN_FREE_PAGES * 2, 1_000_000),
+            "plenty of free pages but a small share of the file"
+        );
+        // The bulk-delete case this exists for: shortening history_days strands most
+        // of the file.
+        assert!(
+            should_reclaim(450_000, 500_000),
+            "90% free after a retention drop should reclaim"
+        );
+        assert!(should_reclaim(
+            VACUUM_MIN_FREE_PAGES,
+            VACUUM_MIN_FREE_PAGES * 4
+        ));
+        // Guards against a divide-by-zero on an empty or unreadable database.
+        assert!(!should_reclaim(10, 0), "zero pages must not divide");
+    }
+
+    #[test]
+    fn test_vacuum_returns_space_after_bulk_delete() {
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        for i in 0..4000 {
+            t.conn
+                .execute(
+                    "INSERT INTO commands
+                     (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                      saved_tokens, savings_pct, exec_time_ms, project_path)
+                     VALUES (?1, ?2, ?2, 100, 20, 80, 80.0, 0, '')",
+                    params![old, format!("padding row {} {}", i, "x".repeat(400))],
+                )
+                .expect("insert bulk row");
+        }
+        let before: i64 = t
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .expect("page_count");
+
+        t.conn
+            .execute("DELETE FROM commands", [])
+            .expect("bulk delete");
+        let freed: i64 = t
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .expect("freelist_count");
+        assert!(
+            freed > 0,
+            "delete alone should strand pages, not return them"
+        );
+
+        t.conn.execute_batch("VACUUM;").expect("vacuum");
+        let after: i64 = t
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .expect("page_count");
+        assert!(
+            after < before,
+            "VACUUM should shrink the database ({} -> {} pages)",
+            before,
+            after
+        );
+        let leftover: i64 = t
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .expect("freelist_count");
+        assert_eq!(leftover, 0, "VACUUM should leave no free pages");
     }
 
     #[test]
