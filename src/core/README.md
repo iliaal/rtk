@@ -104,7 +104,7 @@ Key functions available to all command modules:
 |----------|---------|
 | `truncate(s, max)` | Truncate string with `...` suffix |
 | `strip_ansi(text)` | Remove ANSI escape/color codes |
-| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `resolved_command(name)` | Resolve a command through `which`; `Err(CommandNotFound)` when it is absent |
 | `tool_exists(name)` | Check if a CLI tool is available |
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
 | `package_manager_exec(tool)` | Build `Command` using detected package manager |
