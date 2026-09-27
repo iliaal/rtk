@@ -140,8 +140,9 @@ pub(crate) fn filter_phpstan_json(output: &str) -> String {
         return "PHPStan: No output".to_string();
     }
 
-    try_filter_phpstan_json(output)
-        .unwrap_or_else(|| crate::core::utils::fallback_tail(output, "phpstan (JSON parse error)", 5))
+    try_filter_phpstan_json(output).unwrap_or_else(|| {
+        crate::core::utils::fallback_tail(output, "phpstan (JSON parse error)", 5)
+    })
 }
 
 /// `None` when `output` is not parseable PHPStan JSON, so a caller holding a

@@ -1822,7 +1822,6 @@ fn new_mvn_command(args: &[String], daemon: bool) -> Result<Command> {
     };
     cmd.args(args);
     Ok(cmd)
-
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────

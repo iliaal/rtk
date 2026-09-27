@@ -98,7 +98,6 @@ fn new_gradle_command(args: &[String]) -> Result<Command> {
     };
     cmd.args(args);
     Ok(cmd)
-
 }
 
 /// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.

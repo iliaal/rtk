@@ -58,8 +58,8 @@ where
 fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base =
-        exec_capture(resolved_command("docker")?.args(["ps"])).context("Failed to run docker ps")?;
+    let base = exec_capture(resolved_command("docker")?.args(["ps"]))
+        .context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);

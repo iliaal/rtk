@@ -10,7 +10,7 @@ use crate::cmds::php::{
 };
 use crate::core::runner;
 use crate::core::utils::resolved_command;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub fn run(tool: &str, cmd_args: &[String], verbose: u8) -> Result<i32> {
     if cmd_args.is_empty() {
@@ -56,10 +56,10 @@ pub fn run(tool: &str, cmd_args: &[String], verbose: u8) -> Result<i32> {
 /// we still want the text path to produce something readable.
 fn filter_phpstan_auto(output: &str) -> String {
     let trimmed = output.trim_start();
-    if trimmed.starts_with('{') {
-        if let Some(filtered) = phpstan_cmd::try_filter_phpstan_json(output) {
-            return filtered;
-        }
+    if trimmed.starts_with('{')
+        && let Some(filtered) = phpstan_cmd::try_filter_phpstan_json(output)
+    {
+        return filtered;
     }
     phpstan_cmd::filter_phpstan_text(output)
 }

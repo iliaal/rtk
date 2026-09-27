@@ -1939,18 +1939,17 @@ fn rewrite_segment_inner(
     // Gated to Normal: wrap bypasses the rule lookup below, so without this it
     // would rewrite in pipeline-final position, where every rule but grep/rg is
     // `pipeline_final_safe: false`.
-    if context == RewriteContext::Normal {
-        if let Some((_prefix, inner)) = strip_command_wrapper(cmd_part) {
-            if let Some(tool) = wrappable_tool_for(&inner) {
-                if is_excluded(cmd_part, excluded) {
-                    return None;
-                }
-                return Some(format!(
-                    "rtk wrap {} -- {}{}",
-                    tool, cmd_part, redirect_suffix
-                ));
-            }
+    if context == RewriteContext::Normal
+        && let Some((_prefix, inner)) = strip_command_wrapper(cmd_part)
+        && let Some(tool) = wrappable_tool_for(&inner)
+    {
+        if is_excluded(cmd_part, excluded) {
+            return None;
         }
+        return Some(format!(
+            "rtk wrap {} -- {}{}",
+            tool, cmd_part, redirect_suffix
+        ));
     }
 
     if context == RewriteContext::Normal

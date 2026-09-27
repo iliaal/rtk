@@ -56,7 +56,6 @@ fn git_cmd_c_locale(global_args: &[String]) -> Result<Command> {
     let mut cmd = git_cmd(global_args)?;
     cmd.env("LC_ALL", "C");
     Ok(cmd)
-
 }
 
 fn uses_compact_status_path(args: &[String]) -> bool {
@@ -94,7 +93,6 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Result<Comma
         cmd.args(args);
     }
     Ok(cmd)
-
 }
 
 pub fn run(
@@ -138,65 +136,6 @@ pub fn run(
         GitCommand::Grep => run_grep(args, max_lines, verbose, global_args),
         GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
         GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
-    }
-}
-
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
-///
-/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
-/// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
-///
-/// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
-/// argument; see `normalize_diff_args_impl` for the detection rules.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
-    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
-}
-
-/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
-///
-/// The path-detection logic is:
-/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
-/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
-///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
-fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
-where
-    F: Fn(&str) -> bool,
-{
-    // Already has `--` — nothing to do
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-    let path_start = args.iter().position(|arg| {
-        if arg.starts_with('-') {
-            return false;
-        }
-        // Explicit path prefixes — always treat as path regardless of existence
-        if arg.starts_with('.') || arg.starts_with('~') {
-            return true;
-        }
-        // Contains path separator — use filesystem check to distinguish
-        // branch names (feature/auth) from real paths (src/main.rs)
-        if arg.contains('/') || arg.contains('\\') {
-            return path_exists(arg);
-        }
-        // Bare word (no separator, no special prefix) — never inject `--`
-        // This avoids misidentifying a ref/branch as a path even if a same-named
-        // file happens to exist on disk.
-        false
-    });
-    match path_start {
-        Some(idx) => {
-            let mut out = args[..idx].to_vec();
-            out.push("--".to_string());
-            out.extend_from_slice(&args[idx..]);
-            out
-        }
-        None => args.to_vec(),
     }
 }
 
@@ -390,10 +329,6 @@ fn run_diff(
         return Ok(0);
     }
 
-    // Default RTK behavior: stat first, then compacted diff. `--no-patch --stat` forces the
-    // header to be stat-only whatever the user asked for -- `git diff --stat -p` (or -U3, -W,
-    // ...) emits the patch too, and RTK then printed it again, compacted, for 2.4x the raw
-    // output. The flags go before the user's own `--`, where git still reads them as options.
     // The user's own command runs first, because only it can give git's verdict on what they
     // typed. The stat header below runs with the patch-shape flags stripped, so it answers a
     // *different* command: `git diff -Uabc nonexistent-ref` is `error: --unified expects a
@@ -420,12 +355,10 @@ fn run_diff(
         return Ok(diff_result.exit_code);
     }
 
-    // `--no-patch --stat` forces the header to be stat-only whatever the user asked for --
-    // `git diff --stat -p` (or -U3, -W, ...) emits the patch too, and RTK then printed it
-    // again, compacted, for 2.4x the raw output. The flags go before the user's own `--`,
-    // where git still reads them as options. A failure here costs the header, not the command.
+    // Patch-enabling flags are stripped below. Adding --no-patch also suppresses
+    // the stat header on Git 2.34, so --stat must stand alone.
     let mut cmd = git_cmd(global_args)?;
-    cmd.args(["diff", "--no-patch", "--stat"]);
+    cmd.args(["diff", "--stat"]);
     for arg in args_without_patch_shape(args, &tokens) {
         cmd.arg(arg);
     }
@@ -1924,7 +1857,7 @@ fn run_log(
     let result = exec_capture(&mut cmd).context("Failed to run git log")?;
 
     if !result.success() {
-        eprintln!("{}", result.stderr);
+        eprint!("{}", result.stderr);
         return Ok(result.exit_code);
     }
 
@@ -2159,7 +2092,6 @@ fn requests_raw_log_output(args: &[String]) -> bool {
     tokens.iter().any(|t| log_wants_raw_shape(t, &tokens))
 }
 
-
 /// Warn on stderr when the rendered log is not the whole answer.
 ///
 /// Two things can make it partial: rtk capping the rendered output (announced
@@ -2314,7 +2246,11 @@ pub(crate) fn filter_log_output(
     }
 
     if commits_omitted > 0 {
-        result.push(log_omission_marker(commits_omitted, "commits", commits.len()));
+        result.push(log_omission_marker(
+            commits_omitted,
+            "commits",
+            commits.len(),
+        ));
     }
 
     result.join("\n").trim().to_string()
@@ -2709,7 +2645,6 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Result<Comma
         cmd.arg(arg);
     }
     Ok(cmd)
-
 }
 
 /// Parse the first line of `git commit` success output and return a compact token.
@@ -3895,12 +3830,16 @@ fn git_grep_has_format_flag(args: &[String]) -> bool {
         // scan each letter of a single-dash cluster — `-c -l -L -o -z` all yield
         // output that is already compact or shape-sensitive, so we passthrough.
         match arg.as_str() {
-            "--count" | "--files-with-matches" | "--name-only" | "--files-without-match"
-            | "--only-matching" | "--null" => true,
+            "--count"
+            | "--files-with-matches"
+            | "--name-only"
+            | "--files-without-match"
+            | "--only-matching"
+            | "--null" => true,
             s if s.starts_with("--") => false,
-            s if s.starts_with('-') && s.len() > 1 => {
-                s[1..].chars().any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'z'))
-            }
+            s if s.starts_with('-') && s.len() > 1 => s[1..]
+                .chars()
+                .any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'z')),
             _ => false,
         }
     })
@@ -4006,8 +3945,8 @@ fn run_grep(
 
     // Reuse the same grouped-by-file formatter that `rtk grep` uses; git grep
     // emits the same `path:lineno:content` shape.
-    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("grep")
-        .expect("grep filter must exist");
+    let formatter =
+        crate::cmds::system::pipe_cmd::resolve_filter("grep").expect("grep filter must exist");
     let formatted = formatter(&raw_output);
     print!("{}", formatted);
     if !result.stderr.is_empty() {
@@ -4209,7 +4148,8 @@ mod tests {
 
     #[test]
     fn test_build_status_command_default_compact() {
-        let cmd = build_status_command(&[], &[]).expect("build_status_command: binary must resolve in tests");
+        let cmd = build_status_command(&[], &[])
+            .expect("build_status_command: binary must resolve in tests");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
@@ -4236,7 +4176,8 @@ mod tests {
     #[test]
     fn test_build_status_command_with_user_args_passthrough() {
         let args = vec!["--short".to_string(), "--branch".to_string()];
-        let cmd = build_status_command(&args, &[]).expect("build_status_command: binary must resolve in tests");
+        let cmd = build_status_command(&args, &[])
+            .expect("build_status_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
@@ -4244,7 +4185,8 @@ mod tests {
     #[test]
     fn test_build_status_command_with_incompatible_user_args_passthrough() {
         let args = vec!["--porcelain".to_string(), "-uno".to_string()];
-        let cmd = build_status_command(&args, &[]).expect("build_status_command: binary must resolve in tests");
+        let cmd = build_status_command(&args, &[])
+            .expect("build_status_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
     }
@@ -5658,7 +5600,8 @@ A  added.rs
     fn test_log_elision_notice_reports_injected_no_merges() {
         // --no-merges changes which commits git produced, so there is no in-band
         // marker for it at all; stderr is the only channel that can say so.
-        let notice = log_elision_notice("a\nb\n", "a\nb", true).expect("merge drop must be reported");
+        let notice =
+            log_elision_notice("a\nb\n", "a\nb", true).expect("merge drop must be reported");
         assert!(notice.contains("merge commits excluded"), "got: {notice}");
         assert!(!notice.contains("output capped"), "got: {notice}");
     }
@@ -6924,7 +6867,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_commit_single_message() {
         let args = vec!["-m".to_string(), "fix: typo".to_string()];
-        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
+        let cmd = build_commit_command(&args, &[])
+            .expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -6940,7 +6884,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "-m".to_string(),
             "This allows git commit -m \"title\" -m \"body\".".to_string(),
         ];
-        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
+        let cmd = build_commit_command(&args, &[])
+            .expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -6961,7 +6906,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_commit_am_flag() {
         let args = vec!["-am".to_string(), "quick fix".to_string()];
-        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
+        let cmd = build_commit_command(&args, &[])
+            .expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -6976,7 +6922,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "-m".to_string(),
             "new msg".to_string(),
         ];
-        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
+        let cmd = build_commit_command(&args, &[])
+            .expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
