@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>High-performance CLI proxy that reduces LLM token consumption by 60-90%</strong>
+  <strong>High-performance CLI proxy that cuts up to 90% of the bash output your agent reads</strong>
 </p>
 
 <p align="center">
@@ -34,27 +34,44 @@
 
 ---
 
+<p align="center">
+ <a href="https://www.star-history.com/rtk-ai/rtk">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank&theme=dark" /><source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank" /></picture> <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending&theme=dark" /><source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending" /><img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending" /></picture>
+ </a>
+</p>
+
 rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
-## Token Savings (30-min Claude Code Session)
+## What RTK Does
 
-| Operation | Frequency | Standard | rtk | Savings |
-|-----------|-----------|----------|-----|---------|
-| `ls` / `tree` | 10x | 2,000 | 400 | -80% |
-| `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
-| `git status` | 10x | 3,000 | 600 | -80% |
-| `git diff` | 5x | 10,000 | 2,500 | -75% |
-| `git log` | 5x | 2,500 | 500 | -80% |
-| `git add/commit/push` | 8x | 1,600 | 120 | -92% |
-| `cargo test` / `npm test` | 5x | 25,000 | 2,500 | -90% |
-| `ruff check` | 3x | 3,000 | 600 | -80% |
-| `pytest` | 4x | 8,000 | 800 | -90% |
-| `go test` | 3x | 6,000 | 600 | -90% |
-| `docker ps` | 3x | 900 | 180 | -80% |
-| **Total** | | **~118,000** | **~23,900** | **-80%** |
+RTK intercepts shell commands and compresses their output before your agent reads it.
 
-> Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
+| Operation | What RTK does to the output |
+|-----------|-----------------------------|
+| `ls` / `tree` | Tree format with file counts instead of one line per entry |
+| `cat` / `read` | Smart file reading: signatures and structure over full bodies |
+| `grep` / `rg` | Truncates long lines, groups matches by file |
+| `ast-grep` | Groups structural matches by file, caps overflow |
+| `git status` | Compact stat format, grouped by state |
+| `git diff` | Reduced context, headers stripped |
+| `git log` | Hash, author and subject only |
+| `git add/commit/push` | Confirmation line instead of full progress output |
+| `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
+| `ruff check` | Grouped by rule and file |
+| `sqlfluff lint` | Grouped by rule and file |
+| `pytest` | Failures only, traceback trimmed |
+| `go test` | NDJSON parsed, failures only |
+| `docker ps` | Essential fields only |
+
+## How Savings Work
+
+RTK cuts **up to 90% of the bash output** your agent reads. That is what RTK measures, and it is not the same as cutting your bill by 90%.
+
+Bash output is **one contributor to input tokens**, alongside your prompt, the system prompt and conversation history. Input tokens are in turn **only part of the bill**, which also counts output tokens. The reduction dilutes at every step.
+
+The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
+
+> Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
 
 ## Installation
 
@@ -62,6 +79,14 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 
 ```bash
 brew install rtk
+```
+
+### winget (Windows)
+
+Easiest way to install on Windows — one command, no PATH setup needed:
+
+```powershell
+winget install rtk-ai.rtk
 ```
 
 ### Quick Install (Linux/macOS)
@@ -94,7 +119,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 
 ```bash
 rtk --version   # Should show "rtk 0.28.2"
-rtk gain        # Should show token savings stats
+rtk gain        # Should show the savings dashboard
 ```
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
@@ -111,9 +136,13 @@ rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
+rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
+rtk init --agent omp            # Oh My Pi (OMP)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
+rtk init --agent trae           # Trae (project: .trae/hooks.json)
+rtk init -g --agent trae        # Trae global: ~/.trae and existing ~/.trae-cn
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -130,7 +159,7 @@ Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`)
 
   Claude  --git status-->  shell  -->  git         Claude  --git status-->  RTK  -->  git
     ^                                   |            ^                      |          |
-    |        ~2,000 tokens (raw)        |            |   ~200 tokens        | filter   |
+    |         full raw output           |            |  compact output      | filter   |
     +-----------------------------------+            +------- (filtered) ---+----------+
 ```
 
@@ -141,17 +170,21 @@ Four strategies applied per command type:
 3. **Truncation** - Keeps relevant context, cuts redundancy
 4. **Deduplication** - Collapses repeated log lines with counts
 
+> **Does RTK break Claude's prompt cache?** No. RTK filters output once per command. The result is stored in history and cached normally on subsequent API calls, so the cache keeps working as expected. Smaller outputs also mean cheaper cache writes and reads. See [Troubleshooting](docs/guide/resources/troubleshooting.md#does-rtk-break-claudes-prompt-cache) for details.
+
 ## Commands
+
+> Percentages below are **reductions in bash output**, not reductions in your bill. See [How Savings Work](#how-savings-work).
 
 ### Files
 ```bash
-rtk ls .                        # Token-optimized directory tree
+rtk ls .                        # Compact directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
-rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
+rtk diff file1 file2            # Condensed diff (exit 0: identical, 1: different, 2: read error)
 ```
 
 ### Git
@@ -179,18 +212,22 @@ rtk jest                        # Jest compact (failures only)
 rtk vitest                      # Vitest compact (failures only)
 rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
+rtk phpt                        # PHP .phpt tests (run-tests.php, -99%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
-rtk err <cmd>                   # Filter errors only from any command
-rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk err <cmd> [args...]         # Direct argv execution, errors/warnings only
+rtk test <cmd> [args...]        # Direct argv execution, failures only (-90%)
+rtk err --shell fish '<script>' # Explicit shell for shell-specific syntax
 ```
 
 ### Build & Lint
 ```bash
 rtk lint                        # ESLint grouped by rule/file
 rtk lint biome                  # Supports other linters
+rtk sqlfluff lint               # SQL linting (JSON, -75%)
+rtk sqlfluff lint models/       # Lint a specific directory (pass path after `lint`)
 rtk tsc                         # TypeScript errors grouped by file
 rtk next build                  # Next.js build compact
 rtk prettier --check .          # Files needing formatting
@@ -199,16 +236,31 @@ rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
+rtk mvnd verify                 # Maven Daemon (same filters as rtk mvn)
+rtk sbt test                    # ScalaTest output (-90%)
+rtk sbt compile                 # Compilation errors only (-75%)
+rtk sbt run                     # Strip SBT preamble noise
 ```
 
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
-rtk uv run pytest               # Preserve uv env, errors only
+rtk uv run pytest               # Preserve uv env, keep program output
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
+```
+
+### Runtimes
+```bash
+rtk bun install                  # Strip progress and version lines
+rtk bun test                     # Failures only (-90%)
+rtk bun build                    # Errors only when writing to disk, else passthrough
+rtk bunx tsc                     # Smart routing to tsc filter
+rtk deno test                    # Failures only (-90%)
+rtk deno lint                    # Strip download lines + tee recovery
+rtk deno check                   # Strip download lines + tee recovery
 ```
 
 ### AWS
@@ -220,7 +272,7 @@ rtk aws logs get-log-events     # Timestamped messages only
 rtk aws cloudformation describe-stack-events  # Failures first
 rtk aws dynamodb scan           # Unwraps type annotations
 rtk aws iam list-roles          # Strips policy documents
-rtk aws s3 ls                   # Truncated with tee recovery
+rtk aws s3 ls                   # Truncated with recall recovery
 ```
 
 ### Containers
@@ -254,9 +306,35 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
-rtk summary <long command>      # Heuristic summary
+rtk summary <cmd> [args...]     # Direct argv execution + heuristic summary
+rtk run <cmd> [args...]         # Raw direct execution (no filtering/tracking)
+rtk run -c '<script>'           # Shell string via sh (cmd on Windows)
+rtk run --shell fish -c '<script>' # Explicit shell for shell-specific syntax
 rtk proxy <command>             # Raw passthrough + tracking
 ```
+
+`rtk run`, `rtk err`, `rtk test`, and `rtk summary` preserve positional
+argument boundaries and do not expand globs, variables, or operators by
+default. Use `-c` with `rtk run`, or `--shell <name>` with the filtered
+wrappers, only when a command intentionally requires shell syntax. Pass an
+explicit shell script as one quoted argument; RTK does not infer the parser
+from `$SHELL` because the environment value may differ from the actual command
+executor.
+
+A program that cannot be run answers the way the shell used to: `127` with a
+`command not found` line, `126` for a path that exists but is a directory or is
+not executable.
+
+**Windows note.** The `cmd /C` string these commands used to build also
+searched the working directory and carried `cmd`'s builtins (`echo`, `dir`,
+`type`, `set`, `copy`, `del`, …). Direct execution resolves through `%PATH%`
+and `PATHEXT` only, so `rtk err dir`, `rtk summary echo hi`, and a tool sitting
+in the current directory now need the explicit form: `rtk run -c 'dir'`, or
+`rtk err --shell cmd 'echo hi'`. On Unix nothing equivalent is lost — `sh` does
+not search `.`, and `echo`, `test` and `pwd` all exist as real binaries. One
+more difference on both platforms: the child sees the resolved absolute path in
+`argv[0]` where the shell used to pass the spelling as typed, which matters
+only to multi-call binaries and to tools that print usage from `argv[0]`.
 
 ### Token Savings Analytics
 ```bash
@@ -275,7 +353,7 @@ rtk session                     # Show RTK adoption across recent sessions
 ## Global Flags
 
 ```bash
--u, --ultra-compact    # ASCII icons, inline format (extra token savings)
+-u, --ultra-compact    # ASCII icons, inline format (further output reduction)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
 ```
 
@@ -283,7 +361,7 @@ rtk session                     # Show RTK adoption across recent sessions
 
 **Directory listing:**
 ```
-# ls -la (45 lines, ~800 tokens)        # rtk ls (12 lines, ~150 tokens)
+# ls -la (45 lines)                     # rtk ls (12 lines)
 drwxr-xr-x  15 user staff 480 ...       my-project/
 -rw-r--r--   1 user staff 1234 ...       +-- src/ (8 files)
 ...                                      |   +-- main.rs
@@ -292,7 +370,7 @@ drwxr-xr-x  15 user staff 480 ...       my-project/
 
 **Git operations:**
 ```
-# git push (15 lines, ~200 tokens)       # rtk git push (1 line, ~10 tokens)
+# git push (15 lines)                    # rtk git push (1 line)
 Enumerating objects: 5, done.             ok main
 Counting objects: 100% (5/5), done.
 Delta compression using up to 8 threads
@@ -312,7 +390,7 @@ test utils::test_format ... ok              test_overflow: panic at utils.rs:18
 
 The most effective way to use rtk. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
 
-**Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
+**Result**: 100% rtk adoption across all conversations and subagents, with no per-command context overhead.
 
 **Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
 
@@ -328,11 +406,15 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "high"` in `config.toml` to let the agent know `rtk gain` / `rtk proxy`, or `"full"` for an agent without hook support (or not yet supported by RTK) so it prefixes `rtk` itself — see [Configuration](docs/guide/getting-started/configuration.md#awareness-level).
+
 ## Windows
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
-### Native Windows
+### Native Windows (manual install)
+
+Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
@@ -366,7 +448,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -375,17 +457,21 @@ RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Codex** | `rtk init -g --codex` | PreToolUse hook (`updatedInput`) + AGENTS.md |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
+| **Oh My Pi (OMP)** | `rtk init -g --agent omp` (global) / `rtk init --agent omp` (project) | TypeScript extension (tool_call, shared with Pi) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
-| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
+| **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
-| **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
+| **Google Antigravity** | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | .agents/plugins/rtk/ (project) or ~/.gemini/config/plugins/rtk/ (global): plugin.json, hooks.json, rules/AGENTS.md |
+| **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
+| **Trae** | `rtk init --agent trae` | Native `PreToolUse` hook in `.trae/hooks.json` (`RunCommand`) |
+| **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
@@ -395,19 +481,21 @@ For per-agent setup details, override controls, and graceful degradation, see th
 
 ```toml
 [hooks]
-exclude_commands = ["curl", "playwright"]  # skip rewrite for these
+exclude_commands = ["curl", "playwright"]  # skip rewrite for these (matches `npx playwright` too)
+suppress_hook_warning = false                # suppress the missing-hook warning only
 
-[tee]
-enabled = true          # save raw output on failure (default: true)
-mode = "failures"       # "failures", "always", or "never"
+[retriever]
+mode = "sqlite"         # sqlite (default) | tee (legacy files) | disabled
 ```
 
-When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
+When a command fails, RTK saves the full unfiltered output so the LLM can recall it without re-executing:
 
 ```
 FAILED: 2/15 tests
-[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
+[full output: rtk recall 3f9c2a81d4e7]
 ```
+
+Legacy `[tee]` config sections are still honored: they map to `mode = "tee"` (file-based recovery on failure/truncation), or `mode = "disabled"` if you had `enabled = false`. The former `mode = "always"` keeps its behaviour and maps to `tee_on_success = true`, which archives successful runs too. The sqlite store stays failure/truncation-driven.
 
 For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
 
@@ -437,14 +525,14 @@ RTK can collect **anonymous, aggregate usage metrics** once per day. Telemetry i
 |----------|------|-----|
 | Identity | Salted device hash (SHA-256, not reversible) | Count unique installations without tracking individuals |
 | Environment | RTK version, OS, architecture, install method | Know which platforms to support and test |
-| Usage volume | Command count (24h), total commands, tokens saved (24h/30d/total) | Measure adoption and value delivered |
-| Quality | Top 5 passthrough commands (0% savings), parse failure count, commands with <30% savings | Identify missing filters and weak ones to improve |
+| Usage volume | Command count (24h), total commands, estimated tokens saved (24h/30d/total) | Measure adoption and value delivered |
+| Quality | Top 5 passthrough commands (0% reduction), parse failure count, commands with <30% reduction | Identify missing filters and weak ones to improve |
 | Ecosystem | Command category distribution (e.g. git 45%, cargo 20%, js 15%) | Prioritize filter development for popular ecosystems |
 | Retention | Days since first use, active days in last 30 | Understand engagement and detect churn |
 | Adoption | AI agent hook type (claude/gemini/codex), custom TOML filter count | Track integration coverage and DSL adoption |
 | Configuration | Whether config.toml exists, number of excluded commands, project count | Understand user maturity and customization patterns |
 | Features | Usage counts for meta-commands (gain, discover, proxy, verify) | Know which RTK features are valued vs unused |
-| Economics | Estimated USD savings (based on API token pricing) | Quantify the value RTK provides to users |
+| Economics | Estimated USD value, derived from the estimated tokens saved and a fixed internal constant | Quantify the value RTK provides to users |
 
 All data is **aggregate counts or anonymized command names** (first 3 words, no arguments). Top commands report only tool names (e.g. "git", "cargo"), never full command lines.
 
@@ -493,6 +581,8 @@ export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
   [GitHub](https://github.com/aeppling) · [LinkedIn](https://www.linkedin.com/in/adrien-eppling/)
 - **Nicolas Le Cam** — Core contributor
   [Github](https://github.com/kush) · [LinkedIn](https://www.linkedin.com/in/nicolas-le-cam-386387160/)
+- **Takayuki Maeda** — Core contributor
+  [GitHub](https://github.com/TaKO8Ki) · [LinkedIn](https://www.linkedin.com/in/tako8ki/)
 
 ## Contributing
 
