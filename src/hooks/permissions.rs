@@ -2,13 +2,15 @@ use super::constants::{
     CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
-use crate::core::stream::exec_capture;
-use crate::discover::lexer::split_for_permissions;
+use super::init::resolve_claude_dir;
+use crate::core::user_dirs;
+use crate::core::user_env;
+use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
 use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PermissionVerdict {
     /// An explicit allow rule matched — safe to auto-allow.
     Allow,
@@ -33,19 +35,40 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Claude,
+    Codex,
+    Trae,
     Cursor,
     Gemini,
     Droid,
+    Vibe,
+    Antigravity,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
-    let (deny_rules, ask_rules, allow_rules) = match host {
+    let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
+    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+}
+
+/// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
+/// exactly once. Exposed so a caller that checks many commands against the same
+/// host in a loop (e.g. `rtk discover` scanning thousands of transcript commands)
+/// can load once up front and reuse `check_command_with_rules` per command instead
+/// of going through `check_command_for` and re-reading every settings file from
+/// disk on every single call.
+pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
+    match host {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
-    };
-    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+        // Hosts with no RTK-side rule source. Codex enforces its native
+        // execution rules after updatedInput. Do not interpret these hosts'
+        // rules as Claude Bash patterns or borrow another host's settings.
+        // No RTK-side match means Default, not an explicit Allow.
+        Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
+    }
 }
 
 /// Internal implementation allowing tests to inject rules without file I/O.
@@ -137,7 +160,7 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
@@ -164,25 +187,35 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
         return;
     };
     for rule in arr {
-        if let Some(s) = rule.as_str() {
-            if s.starts_with("Bash(") {
-                target.push(extract_bash_pattern(s).to_string());
-            }
+        if let Some(s) = rule.as_str()
+            && s.starts_with("Bash(")
+        {
+            target.push(extract_bash_pattern(s).to_string());
         }
     }
 }
 
 /// Return the ordered list of Claude Code settings file paths to check.
 fn get_settings_paths() -> Vec<PathBuf> {
+    get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
+}
+
+/// Assemble the settings paths for a project root and a resolved Claude config dir.
+///
+/// `claude_dir` is already resolved, so it honors `CLAUDE_CONFIG_DIR` when set.
+fn get_settings_paths_from(
+    project_root: Option<PathBuf>,
+    claude_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(root) = find_project_root() {
+    if let Some(root) = project_root {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    if let Some(claude_dir) = claude_dir {
+        paths.push(claude_dir.join(SETTINGS_JSON));
+        paths.push(claude_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths
@@ -190,7 +223,7 @@ fn get_settings_paths() -> Vec<PathBuf> {
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&content) {
+    match crate::core::utils::from_json_str::<Value>(&content) {
         Ok(v) => Some(v),
         Err(_) => {
             eprintln!(
@@ -225,7 +258,7 @@ fn append_wrapped_rules(rules_value: Option<&Value>, prefixes: &[&str], target: 
 // else defers to the host, which applies its own project config and folder-trust.
 // This keeps RTK's allow set a subset of the host's — never more permissive.
 fn global_config(dir: &str, file: &str) -> Option<Value> {
-    read_json(&dirs::home_dir()?.join(dir).join(file))
+    read_json(&user_dirs::home()?.join(dir).join(file))
 }
 
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -247,7 +280,7 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // untrusted → global, which is safe: never more permissive than the host).
 fn gemini_settings() -> Option<Value> {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
-    let trusted = std::env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Ok("true")
+    let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
         || !global
             .as_ref()
             .and_then(|j| {
@@ -255,12 +288,11 @@ fn gemini_settings() -> Option<Value> {
                     .and_then(Value::as_bool)
             })
             .unwrap_or(false);
-    if trusted {
-        if let Some(root) = find_project_root() {
-            if let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
-                return Some(v);
-            }
-        }
+    if trusted
+        && let Some(root) = find_project_root()
+        && let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
+    {
+        return Some(v);
     }
     global
 }
@@ -281,10 +313,10 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
 fn droid_settings_scopes() -> Vec<Value> {
     let mut dirs_to_read = Vec::new();
-    if let Some(home) = std::env::var_os(DROID_HOME_ENV)
+    if let Some(home) = user_dirs::env_path(DROID_HOME_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .or_else(user_dirs::home)
     {
         dirs_to_read.push(home.join(DROID_DIR));
     }
@@ -338,37 +370,17 @@ pub(crate) fn droid_rules_from_settings(
 ///
 /// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
 fn find_project_root() -> Option<PathBuf> {
-    // Fast path: walk up CWD looking for .claude/ — no subprocess needed.
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join(CLAUDE_DIR).exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-
-    // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--show-toplevel"]);
-    let result = exec_capture(&mut cmd).ok()?;
-
-    if result.success() {
-        return Some(PathBuf::from(result.stdout.trim()));
-    }
-
-    None
+    user_dirs::project_root(CLAUDE_DIR)
 }
 
 /// Extract the pattern string from inside `Bash(pattern)`.
 ///
 /// Returns the original string unchanged if it does not match the expected format.
 pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
-    if let Some(inner) = rule.strip_prefix("Bash(") {
-        if let Some(pattern) = inner.strip_suffix(')') {
-            return pattern;
-        }
+    if let Some(inner) = rule.strip_prefix("Bash(")
+        && let Some(pattern) = inner.strip_suffix(')')
+    {
+        return pattern;
     }
     rule
 }
@@ -381,8 +393,16 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
-    let pattern_norm = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Shares the lexer's word-boundary definition rather than
+    // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
+    let normalize = |s: &str| {
+        s.split(is_word_boundary_whitespace)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let cmd_norm = normalize(cmd);
+    let pattern_norm = normalize(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -475,6 +495,39 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_settings_paths_uses_the_resolved_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+        let profile = PathBuf::from("/profiles/work/.claude");
+
+        let paths = get_settings_paths_from(Some(project.clone()), Some(profile.clone()));
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+                profile.join(SETTINGS_JSON),
+                profile.join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_settings_paths_without_a_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+
+        let paths = get_settings_paths_from(Some(project.clone()), None);
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_bash_pattern() {
@@ -941,6 +994,32 @@ mod tests {
         assert_eq!(
             check_command_with_rules("git status\nrm -rf ~", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_lone_cr_hidden_command_not_auto_allowed() {
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status\rrm -rf ~", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_lone_cr_does_not_collapse_to_space_in_pattern_match() {
+        assert!(!command_matches_pattern(
+            "git status\rrm -rf ~",
+            "git status"
+        ));
+    }
+
+    #[test]
+    fn test_lone_cr_segment_still_denied() {
+        let deny = vec!["rm:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status\rrm -rf ~", &deny, &[], &[]),
+            PermissionVerdict::Deny
         );
     }
 

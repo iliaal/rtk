@@ -8,6 +8,7 @@
 
 use super::utils::php_tool_command;
 use crate::core::runner;
+use crate::core::user_dirs;
 use crate::core::utils::fallback_tail;
 use anyhow::Result;
 use serde::Deserialize;
@@ -103,7 +104,7 @@ pub(crate) fn filter_pint_json(output: &str) -> String {
     let mut result = format!("pint: {} changes in {} files\n", total_rules, total_files);
 
     // Resolve cwd once; short_path() used to re-syscall current_dir() per file.
-    let cwd_prefix = std::env::current_dir()
+    let cwd_prefix = user_dirs::current_dir()
         .ok()
         .and_then(|p| p.into_os_string().into_string().ok())
         .map(|s| format!("{}/", s));
@@ -188,10 +189,7 @@ mod tests {
     fn test_pint_file_truncation() {
         let mut files = Vec::new();
         for i in 1..=20 {
-            files.push(format!(
-                r#"{{"name":"f{}.php","appliedFixers":["x"]}}"#,
-                i
-            ));
+            files.push(format!(r#"{{"name":"f{}.php","appliedFixers":["x"]}}"#, i));
         }
         let json = format!(r#"{{"files":[{}]}}"#, files.join(","));
         let result = filter_pint_json(&json);
