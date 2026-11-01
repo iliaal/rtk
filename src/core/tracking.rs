@@ -891,58 +891,27 @@ impl Tracker {
     }
 
     fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
+        let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(self.history_days))
+        else {
+            return Ok(());
+        };
         let cutoff_day = cutoff.format("%Y-%m-%d").to_string();
         let cutoff = cutoff.to_rfc3339();
-        let mut deleted = self
-            .conn
+        self.conn
             .execute("DELETE FROM commands WHERE timestamp < ?1", params![cutoff])?;
-        deleted += self.conn.execute(
+        self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff],
         )?;
-        deleted += self.conn.execute(
+        self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff],
         )?;
-        deleted += self.conn.execute(
+        self.conn.execute(
             "DELETE FROM engine_attribution WHERE day < ?1",
             params![cutoff_day],
         )?;
-        if deleted > 0 {
-            self.reclaim_if_fragmented();
-        }
         Ok(())
-    }
-
-    /// Return freed pages to the filesystem when enough of the file is empty.
-    ///
-    /// These databases have no `auto_vacuum`, so a delete only marks pages reusable:
-    /// the file never shrinks on its own. Shortening `history_days` therefore prunes
-    /// millions of rows and leaves the file at its old size until something vacuums.
-    ///
-    /// `VACUUM` rewrites the whole database and takes an exclusive lock, so it must not
-    /// run on every `cleanup_old` (that is once per tracked command). Gating on the free
-    /// ratio keeps it near-free in steady state, where inserts reuse freed pages and the
-    /// freelist stays flat, and lets it fire on the bulk deletes that actually strand
-    /// space. Failure is ignored: reclaiming disk must never fail a user's command.
-    fn reclaim_if_fragmented(&self) {
-        let free: i64 = match self
-            .conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-        {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let total: i64 = match self.conn.query_row("PRAGMA page_count", [], |r| r.get(0)) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        if should_reclaim(free, total) {
-            // Cannot run inside a transaction, and needs scratch space roughly the size
-            // of the live data. Both are why this stays best-effort.
-            let _ = self.conn.execute_batch("VACUUM;");
-        }
     }
 
     /// Delete all tracked data (commands + parse_failures + hook_decisions), resetting all stats to zero.
@@ -1051,7 +1020,10 @@ impl Tracker {
     /// `maybe_cleanup_hook_decisions` so it's directly callable (bypassing the
     /// sampling gate) from tests without needing to hit the 1-in-N chance for real.
     fn cleanup_hook_decisions(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
+        let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(self.history_days))
+        else {
+            return Ok(());
+        };
         self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -1969,26 +1941,9 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
 /// fails the whole parse). A non-positive value also falls back rather than being
 /// honored: a typo'd `0` would otherwise delete the entire history on the next write.
 fn configured_history_days() -> i64 {
-    resolve_history_days(
-        crate::core::config::Config::load()
-            .ok()
-            .map(|c| c.tracking.history_days),
-    )
-}
-
-/// Free pages below this never justify a rewrite, whatever the ratio. At SQLite's 4 KiB
-/// default this is ~16 MB, so small databases are left alone.
-const VACUUM_MIN_FREE_PAGES: i64 = 4096;
-/// Percentage of the file that must be free pages before a rewrite pays for itself.
-const VACUUM_MIN_FREE_PCT: i64 = 25;
-
-/// Decision half of [`Tracker::reclaim_if_fragmented`], split out so the thresholds are
-/// testable without building a database large enough to cross them.
-fn should_reclaim(free_pages: i64, total_pages: i64) -> bool {
-    if total_pages <= 0 || free_pages < VACUUM_MIN_FREE_PAGES {
-        return false;
-    }
-    free_pages.saturating_mul(100) / total_pages >= VACUUM_MIN_FREE_PCT
+    resolve_history_days(Some(
+        crate::core::config::cached_config().tracking.history_days,
+    ))
 }
 
 /// Clamping half of [`configured_history_days`], split out so it is testable without
@@ -3333,80 +3288,61 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reclaim_thresholds() {
-        // Steady state: inserts reuse freed pages, so the freelist stays flat and a
-        // per-command VACUUM would be pure waste.
-        assert!(!should_reclaim(0, 100_000), "no free pages");
-        assert!(
-            !should_reclaim(VACUUM_MIN_FREE_PAGES - 1, VACUUM_MIN_FREE_PAGES),
-            "tiny database, high ratio: not worth a rewrite"
-        );
-        assert!(
-            !should_reclaim(VACUUM_MIN_FREE_PAGES * 2, 1_000_000),
-            "plenty of free pages but a small share of the file"
-        );
-        // The bulk-delete case this exists for: shortening history_days strands most
-        // of the file.
-        assert!(
-            should_reclaim(450_000, 500_000),
-            "90% free after a retention drop should reclaim"
-        );
-        assert!(should_reclaim(
-            VACUUM_MIN_FREE_PAGES,
-            VACUUM_MIN_FREE_PAGES * 4
-        ));
-        // Guards against a divide-by-zero on an empty or unreadable database.
-        assert!(!should_reclaim(10, 0), "zero pages must not divide");
+    fn test_cleanup_old_retains_with_unrepresentable_cutoff() {
+        for history_days in [99_999_999, i64::from(u32::MAX)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            t.record("git status", "rtk git status fresh", 100, 20, 5)
+                .expect("record with an unrepresentable cutoff");
+
+            for (table, expected) in [
+                ("commands", 2),
+                ("parse_failures", 1),
+                ("hook_decisions", 1),
+                ("engine_attribution", 1),
+            ] {
+                let count: i64 = t
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .expect("count retained rows");
+                assert_eq!(count, expected, "{table} at {history_days}-day retention");
+            }
+        }
     }
 
     #[test]
-    fn test_vacuum_returns_space_after_bulk_delete() {
-        let t = Tracker::new_in_memory().expect("in-memory tracker");
-        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
-        for i in 0..4000 {
-            t.conn
-                .execute(
-                    "INSERT INTO commands
-                     (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
-                      saved_tokens, savings_pct, exec_time_ms, project_path)
-                     VALUES (?1, ?2, ?2, 100, 20, 80, 80.0, 0, '')",
-                    params![old, format!("padding row {} {}", i, "x".repeat(400))],
-                )
-                .expect("insert bulk row");
+    fn test_cleanup_hook_decisions_retains_with_unrepresentable_cutoff() {
+        for history_days in [99_999_999, i64::from(u32::MAX)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            t.cleanup_hook_decisions()
+                .expect("hook cleanup with an unrepresentable cutoff");
+            assert_eq!(
+                t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                    .expect("query hook decisions")
+                    .len(),
+                1,
+                "10-day-old hook decision at {history_days}-day retention"
+            );
         }
-        let before: i64 = t
-            .conn
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .expect("page_count");
+    }
 
-        t.conn
-            .execute("DELETE FROM commands", [])
-            .expect("bulk delete");
-        let freed: i64 = t
-            .conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .expect("freelist_count");
-        assert!(
-            freed > 0,
-            "delete alone should strand pages, not return them"
-        );
+    #[test]
+    fn test_tracker_new_reads_configured_history_days() {
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            let config_dir = user_dirs::config().expect("isolated config directory");
+            std::fs::create_dir_all(&config_dir).expect("create config directory");
+            std::fs::write(
+                config_dir.join("config.toml"),
+                "[tracking]\nenabled = true\nhistory_days = 7\n",
+            )
+            .expect("write tracking config");
 
-        t.conn.execute_batch("VACUUM;").expect("vacuum");
-        let after: i64 = t
-            .conn
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .expect("page_count");
-        assert!(
-            after < before,
-            "VACUUM should shrink the database ({} -> {} pages)",
-            before,
-            after
-        );
-        let leftover: i64 = t
-            .conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .expect("freelist_count");
-        assert_eq!(leftover, 0, "VACUUM should leave no free pages");
+            let db_path = root.path().join("configured-history.db");
+            user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+                let t = Tracker::new().expect("tracker from config");
+                assert_eq!(t.history_days, 7);
+            });
+        });
     }
 
     #[test]
